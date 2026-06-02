@@ -155,9 +155,10 @@ Open an **x64 Visual Studio Developer Command Prompt** and run one of the build 
 ### Release tree
 
 ```bat
-cd /d <repo-root>
 src\build.cmd
 ```
+
+Run this command from the repository root.
 
 Build output:
 
@@ -168,9 +169,10 @@ Build output:
 ### Debug tree
 
 ```bat
-cd /d <repo-root>\src_dbg01
 build.cmd
 ```
+
+Run this command from the `src_dbg01` directory.
 
 Build output:
 
