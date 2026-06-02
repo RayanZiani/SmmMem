@@ -8,12 +8,12 @@ SmmMem exposes a small Windows client API that can read, write, translate, and r
 
 The repository contains two firmware builds:
 
-- `/tmp/workspace/RayanZiani/SmmMem/src`: release-oriented firmware and client
-- `/tmp/workspace/RayanZiani/SmmMem/src_dbg01`: debug build with extra firmware tracing and a Windows debug reader
+- `src`: release-oriented firmware and client
+- `src_dbg01`: debug build with extra firmware tracing and a Windows debug reader
 
 ## Repository Layout
 
-### `/tmp/workspace/RayanZiani/SmmMem/src`
+### `src`
 
 - `Dxe.c`: allocates the mailbox, publishes configuration, builds and installs the ACPI SSDT/WMI device, and attempts to configure the SMM side through `EFI_SMM_COMMUNICATION_PROTOCOL`
 - `Smm.c`: registers the configuration communication handler and software SMI handler, translates addresses, walks page tables, locates processes/modules/exports, and services requests from the mailbox
@@ -22,7 +22,7 @@ The repository contains two firmware builds:
 - `Common.h`: shared protocol, structure, GUID, command, and firmware type definitions
 - `build.cmd`: builds `Dxe.efi`, `Smm.efi`, and the sample client
 
-### `/tmp/workspace/RayanZiani/SmmMem/src_dbg01`
+### `src_dbg01`
 
 The debug tree mirrors the release tree and adds firmware instrumentation:
 
@@ -155,7 +155,7 @@ Open an **x64 Visual Studio Developer Command Prompt** and run one of the build 
 ### Release tree
 
 ```bat
-cd /d /tmp/workspace/RayanZiani/SmmMem
+cd /d <repo-root>
 src\build.cmd
 ```
 
@@ -168,7 +168,7 @@ Build output:
 ### Debug tree
 
 ```bat
-cd /d /tmp/workspace/RayanZiani/SmmMem/src_dbg01
+cd /d <repo-root>\src_dbg01
 build.cmd
 ```
 
