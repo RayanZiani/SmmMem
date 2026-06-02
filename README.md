@@ -60,9 +60,15 @@ The effective flow implemented by the source tree is:
 
 `Usermode application -> WmiExecuteMethodW -> ACPI WMI method -> shared mailbox -> software SMI -> SMM handler -> response mailbox -> usermode`
 
-You can embed the provided diagram in environments that render Markdown images:
-
-![SmmMem communication flow](https://github.com/user-attachments/assets/c4baf141-250f-4b38-975f-79fa4cb5a19e)
+```mermaid
+flowchart LR
+    A[Usermode Application] --> B[WmiExecuteMethodW]
+    B --> C[ACPI WMI Method]
+    C --> D[Shared Mailbox]
+    D --> E[Software SMI]
+    E --> F[SMM Handler]
+    F --> G[Response Back to Usermode]
+```
 
 ## Communication Details
 
@@ -169,10 +175,10 @@ Build output:
 ### Debug tree
 
 ```bat
-build.cmd
+src_dbg01\build.cmd
 ```
 
-Run this command from the `src_dbg01` directory.
+Run this command from the repository root.
 
 Build output:
 
