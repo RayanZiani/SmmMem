@@ -10,7 +10,7 @@ if errorlevel 1 (
     exit /b 1
 )
 
-set "OUT=Work\build_debug02"
+set "OUT=Work\build_debug03"
 mkdir "%OUT%" 2>nul
 del /q "%OUT%\*.obj" "%OUT%\*.efi" "%OUT%\*.exe" 2>nul
 
@@ -25,7 +25,7 @@ link %EFI_LD% /subsystem:EFI_BOOT_SERVICE_DRIVER /entry:DxeEntry /out:%OUT%\Dxe.
 
 call cl /nologo /W4 /O2 /DUNICODE /D_UNICODE /Fo:%OUT%\Client.obj /Fe:%OUT%\Client.exe "%SRC%Client.c" || exit /b 1
 call cl /nologo /W4 /O2 /Fo:%OUT%\DbgRead.obj /Fe:%OUT%\DbgRead.exe "%SRC%DbgRead.c" advapi32.lib || exit /b 1
-REM API example build: call cl /nologo /W4 /O2 /DUNICODE /D_UNICODE /DAPI_ONLY /Fo:%OUT%\ /Fe:%OUT%\example.exe src\example.c src\Client.c || exit /b 1
+REM API example build: call cl /nologo /W4 /O2 /DUNICODE /D_UNICODE /DAPI_ONLY /Fo:%OUT%\ /Fe:%OUT%\example.exe example.c Client.c || exit /b 1
 
 echo Built:
 echo   %OUT%\Smm.efi

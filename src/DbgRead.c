@@ -129,6 +129,13 @@ static const char *StageName(uint32_t Stage) {
   case 0x3D0: return "fill process";
   case 0x3E0: return "find module";
   case 0x3F0: return "request done";
+  case 0x400: return "SMM map start";
+  case 0x410: return "SMM map PML4E";
+  case 0x420: return "SMM map PDPTE";
+  case 0x430: return "SMM map PDE";
+  case 0x440: return "SMM map PTE";
+  case 0x450: return "SMM map done";
+  case 0x460: return "copy begin";
   default: return "unknown";
   }
 }

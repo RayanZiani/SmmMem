@@ -65,6 +65,7 @@ static DEBUG_TRACE gRuntimeTrace;
 static UINT32 gRuntimeTraceInit;
 static UINT32 gRuntimeTraceActive;
 static UINT32 gCopyPhysTraceCount;
+static UINT32 gHighPhysTraceCount;
 static UINT32 gTranslateTraceCount;
 static UINT32 gKernelScanTraceCount;
 static CHAR16 gSmmDebugName[] = {
@@ -162,6 +163,11 @@ static VOID RuntimeRecord(UINT32 Stage, EFI_STATUS Status, UINT64 Data0,
   gRuntimeTrace.Records[Index].Data0 = Data0;
   gRuntimeTrace.Records[Index].Data1 = Data1;
   gRuntimeTrace.Records[Index].Data2 = Data2;
+}
+
+static VOID RuntimeFlush(VOID) {
+  InitRuntimeTrace();
+  gRuntimeTrace.State = gSmmDebugState;
   SetDebugVariable(gRuntimeTraceName, &gRuntimeTrace, sizeof(gRuntimeTrace));
 }
 
@@ -292,20 +298,144 @@ static BOOLEAN IsUserPtr(UINT64 Value) {
   return Value >= 0x10000ULL && Value < 0x0000800000000000ULL;
 }
 
+static UINT64 PhysMask(VOID);
+
+static BOOLEAN IsHighPhysicalCopy(UINT64 Address, UINTN Size) {
+  if (Address >= 0x100000000ULL) {
+    return 1;
+  }
+  if (Size != 0 && Address > 0x100000000ULL - (UINT64)Size) {
+    return 1;
+  }
+  return 0;
+}
+
+static EFI_STATUS TraceSmmMapping(UINT64 Address) {
+  volatile UINT64 *EntryPtr;
+  UINT64 Cr3;
+  UINT64 Mask;
+  UINT64 Entry;
+  UINT64 Base;
+  UINT64 Index;
+
+  Cr3 = __readcr3() & PAGE_MASK;
+  Mask = PhysMask();
+  RuntimeRecord(DBG_RT_SMM_MAP_START, EFI_SUCCESS, Cr3, Address, Mask);
+
+  Base = Cr3 & Mask;
+  Index = (Address >> 39) & 0x1FFULL;
+  EntryPtr = (volatile UINT64 *)(UINTN)(Base + Index * sizeof(UINT64));
+  RuntimeRecord(DBG_RT_SMM_MAP_PML4E, EFI_SUCCESS, (UINT64)(UINTN)EntryPtr,
+                Index, 0);
+  RuntimeFlush();
+  Entry = *EntryPtr;
+  RuntimeRecord(DBG_RT_SMM_MAP_PML4E, EFI_SUCCESS, (UINT64)(UINTN)EntryPtr,
+                Entry, Index);
+  RuntimeFlush();
+  if ((Entry & PTE_PRESENT) == 0) {
+    RuntimeRecord(DBG_RT_SMM_MAP_DONE, EFI_NOT_FOUND, Address, 4, Entry);
+    RuntimeFlush();
+    return EFI_NOT_FOUND;
+  }
+
+  Base = Entry & Mask;
+  Index = (Address >> 30) & 0x1FFULL;
+  EntryPtr = (volatile UINT64 *)(UINTN)(Base + Index * sizeof(UINT64));
+  RuntimeRecord(DBG_RT_SMM_MAP_PDPTE, EFI_SUCCESS, (UINT64)(UINTN)EntryPtr,
+                Index, 0);
+  RuntimeFlush();
+  Entry = *EntryPtr;
+  RuntimeRecord(DBG_RT_SMM_MAP_PDPTE, EFI_SUCCESS, (UINT64)(UINTN)EntryPtr,
+                Entry, Index);
+  RuntimeFlush();
+  if ((Entry & PTE_PRESENT) == 0) {
+    RuntimeRecord(DBG_RT_SMM_MAP_DONE, EFI_NOT_FOUND, Address, 3, Entry);
+    RuntimeFlush();
+    return EFI_NOT_FOUND;
+  }
+  if ((Entry & PTE_LARGE) != 0) {
+    RuntimeRecord(DBG_RT_SMM_MAP_DONE, EFI_SUCCESS, Address, 3, Entry);
+    RuntimeFlush();
+    return EFI_SUCCESS;
+  }
+
+  Base = Entry & Mask;
+  Index = (Address >> 21) & 0x1FFULL;
+  EntryPtr = (volatile UINT64 *)(UINTN)(Base + Index * sizeof(UINT64));
+  RuntimeRecord(DBG_RT_SMM_MAP_PDE, EFI_SUCCESS, (UINT64)(UINTN)EntryPtr,
+                Index, 0);
+  RuntimeFlush();
+  Entry = *EntryPtr;
+  RuntimeRecord(DBG_RT_SMM_MAP_PDE, EFI_SUCCESS, (UINT64)(UINTN)EntryPtr,
+                Entry, Index);
+  RuntimeFlush();
+  if ((Entry & PTE_PRESENT) == 0) {
+    RuntimeRecord(DBG_RT_SMM_MAP_DONE, EFI_NOT_FOUND, Address, 2, Entry);
+    RuntimeFlush();
+    return EFI_NOT_FOUND;
+  }
+  if ((Entry & PTE_LARGE) != 0) {
+    RuntimeRecord(DBG_RT_SMM_MAP_DONE, EFI_SUCCESS, Address, 2, Entry);
+    RuntimeFlush();
+    return EFI_SUCCESS;
+  }
+
+  Base = Entry & Mask;
+  Index = (Address >> 12) & 0x1FFULL;
+  EntryPtr = (volatile UINT64 *)(UINTN)(Base + Index * sizeof(UINT64));
+  RuntimeRecord(DBG_RT_SMM_MAP_PTE, EFI_SUCCESS, (UINT64)(UINTN)EntryPtr,
+                Index, 0);
+  RuntimeFlush();
+  Entry = *EntryPtr;
+  RuntimeRecord(DBG_RT_SMM_MAP_PTE, EFI_SUCCESS, (UINT64)(UINTN)EntryPtr,
+                Entry, Index);
+  RuntimeFlush();
+  if ((Entry & PTE_PRESENT) == 0) {
+    RuntimeRecord(DBG_RT_SMM_MAP_DONE, EFI_NOT_FOUND, Address, 1, Entry);
+    RuntimeFlush();
+    return EFI_NOT_FOUND;
+  }
+
+  RuntimeRecord(DBG_RT_SMM_MAP_DONE, EFI_SUCCESS, Address, 1, Entry);
+  RuntimeFlush();
+  return EFI_SUCCESS;
+}
+
 static EFI_STATUS CopyPhys(UINT64 Address, VOID *Buffer, UINTN Size,
                            BOOLEAN Write) {
   SMM_CPU_IO Access;
   EFI_STATUS Status;
+  BOOLEAN HighTrace;
 
-  if (gRuntimeTraceActive != 0 && gCopyPhysTraceCount < 96) {
+  HighTrace = gRuntimeTraceActive != 0 &&
+              IsHighPhysicalCopy(Address, Size) &&
+              gHighPhysTraceCount < 8;
+  if (gRuntimeTraceActive != 0 && gCopyPhysTraceCount < 32) {
     RuntimeRecord(DBG_RT_COPY_PHYS, EFI_SUCCESS, Address, Size, Write);
     gCopyPhysTraceCount++;
   }
+  if (HighTrace) {
+    gHighPhysTraceCount++;
+    RuntimeRecord(DBG_RT_COPY_PHYS, EFI_SUCCESS, Address, Size,
+                  Write | 0x100ULL);
+    RuntimeFlush();
+    Status = TraceSmmMapping(Address);
+    if (EFI_ERROR(Status)) {
+      return Status;
+    }
+  }
   Access = (SMM_CPU_IO)(Write ? gSmst->SmmIo.Mem.Write
                               : gSmst->SmmIo.Mem.Read);
+  if (HighTrace) {
+    RuntimeRecord(DBG_RT_COPY_BEGIN, EFI_SUCCESS, Address, Size, Write);
+    RuntimeFlush();
+  }
   Status = Access(&gSmst->SmmIo, 0, Address, Size, Buffer);
-  if (gRuntimeTraceActive != 0 && EFI_ERROR(Status)) {
+  if (gRuntimeTraceActive != 0 && (EFI_ERROR(Status) || HighTrace)) {
     RuntimeRecord(DBG_RT_COPY_PHYS, Status, Address, Size, Write);
+    if (HighTrace || EFI_ERROR(Status)) {
+      RuntimeFlush();
+    }
   }
   return Status;
 }
@@ -1071,15 +1201,18 @@ static EFI_STATUS HandleRequest(REQUEST *Request, RESPONSE *Response) {
   gRuntimeTraceInit = 0;
   gRuntimeTraceActive = 1;
   gCopyPhysTraceCount = 0;
+  gHighPhysTraceCount = 0;
   gTranslateTraceCount = 0;
   gKernelScanTraceCount = 0;
   RuntimeRecord(DBG_RT_REQUEST, EFI_SUCCESS, Request->Command,
                 Request->Sequence, Request->DataSize);
+  RuntimeFlush();
   Size = (UINT32)Request->Arg3;
   if (Request->Command == CMD_PING) {
     Reply(Response, Request, EFI_SUCCESS, 0x504F4E47ULL, 0, 0);
     RuntimeRecord(DBG_RT_REQUEST_DONE, EFI_SUCCESS, Request->Command,
                   Response->Magic, Response->Status);
+    RuntimeFlush();
     gRuntimeTraceActive = 0;
     return EFI_SUCCESS;
   }
@@ -1089,6 +1222,7 @@ static EFI_STATUS HandleRequest(REQUEST *Request, RESPONSE *Response) {
       Reply(Response, Request, EFI_INVALID_PARAMETER, 0, 0, 0);
       RuntimeRecord(DBG_RT_REQUEST_DONE, EFI_INVALID_PARAMETER,
                     Request->Command, Size, RESPONSE_DATA_SIZE);
+      RuntimeFlush();
       gRuntimeTraceActive = 0;
       return EFI_INVALID_PARAMETER;
     }
@@ -1097,6 +1231,7 @@ static EFI_STATUS HandleRequest(REQUEST *Request, RESPONSE *Response) {
           EFI_ERROR(Status) ? 0 : Size);
     RuntimeRecord(DBG_RT_REQUEST_DONE, Status, Request->Command,
                   Request->Arg1, Size);
+    RuntimeFlush();
     gRuntimeTraceActive = 0;
     return Status;
   }
@@ -1107,6 +1242,7 @@ static EFI_STATUS HandleRequest(REQUEST *Request, RESPONSE *Response) {
     Reply(Response, Request, Status, Request->Arg1, 0, 0);
     RuntimeRecord(DBG_RT_REQUEST_DONE, Status, Request->Command,
                   Request->Arg1, Request->DataSize);
+    RuntimeFlush();
     gRuntimeTraceActive = 0;
     return Status;
   }
@@ -1116,6 +1252,7 @@ static EFI_STATUS HandleRequest(REQUEST *Request, RESPONSE *Response) {
           EFI_ERROR(Status) ? 0 : sizeof(Process));
     RuntimeRecord(DBG_RT_REQUEST_DONE, Status, Request->Command,
                   Process.Eprocess, Process.Pid);
+    RuntimeFlush();
     gRuntimeTraceActive = 0;
     return Status;
   }
@@ -1125,6 +1262,7 @@ static EFI_STATUS HandleRequest(REQUEST *Request, RESPONSE *Response) {
           EFI_ERROR(Status) ? 0 : sizeof(Process));
     RuntimeRecord(DBG_RT_REQUEST_DONE, Status, Request->Command,
                   Process.Eprocess, Process.Pid);
+    RuntimeFlush();
     gRuntimeTraceActive = 0;
     return Status;
   }
@@ -1136,6 +1274,7 @@ static EFI_STATUS HandleRequest(REQUEST *Request, RESPONSE *Response) {
     Reply(Response, Request, Status, EFI_ERROR(Status) ? 0 : Pa, 0, 0);
     RuntimeRecord(DBG_RT_REQUEST_DONE, Status, Request->Command, Pa,
                   Request->Arg2);
+    RuntimeFlush();
     gRuntimeTraceActive = 0;
     return Status;
   }
@@ -1144,6 +1283,7 @@ static EFI_STATUS HandleRequest(REQUEST *Request, RESPONSE *Response) {
       Reply(Response, Request, EFI_INVALID_PARAMETER, 0, 0, 0);
       RuntimeRecord(DBG_RT_REQUEST_DONE, EFI_INVALID_PARAMETER,
                     Request->Command, Size, RESPONSE_DATA_SIZE);
+      RuntimeFlush();
       gRuntimeTraceActive = 0;
       return EFI_INVALID_PARAMETER;
     }
@@ -1155,6 +1295,7 @@ static EFI_STATUS HandleRequest(REQUEST *Request, RESPONSE *Response) {
           EFI_ERROR(Status) ? 0 : Size);
     RuntimeRecord(DBG_RT_REQUEST_DONE, Status, Request->Command,
                   Request->Arg2, Size);
+    RuntimeFlush();
     gRuntimeTraceActive = 0;
     return Status;
   }
@@ -1163,6 +1304,7 @@ static EFI_STATUS HandleRequest(REQUEST *Request, RESPONSE *Response) {
       Reply(Response, Request, EFI_INVALID_PARAMETER, 0, 0, 0);
       RuntimeRecord(DBG_RT_REQUEST_DONE, EFI_INVALID_PARAMETER,
                     Request->Command, Request->DataSize, RESPONSE_DATA_SIZE);
+      RuntimeFlush();
       gRuntimeTraceActive = 0;
       return EFI_INVALID_PARAMETER;
     }
@@ -1174,6 +1316,7 @@ static EFI_STATUS HandleRequest(REQUEST *Request, RESPONSE *Response) {
     Reply(Response, Request, Status, Request->Arg2, 0, 0);
     RuntimeRecord(DBG_RT_REQUEST_DONE, Status, Request->Command,
                   Request->Arg2, Request->DataSize);
+    RuntimeFlush();
     gRuntimeTraceActive = 0;
     return Status;
   }
@@ -1184,6 +1327,7 @@ static EFI_STATUS HandleRequest(REQUEST *Request, RESPONSE *Response) {
           EFI_ERROR(Status) ? 0 : sizeof(Module));
     RuntimeRecord(DBG_RT_REQUEST_DONE, Status, Request->Command, Module.Base,
                   Module.Size);
+    RuntimeFlush();
     gRuntimeTraceActive = 0;
     return Status;
   }
@@ -1193,6 +1337,7 @@ static EFI_STATUS HandleRequest(REQUEST *Request, RESPONSE *Response) {
           EFI_ERROR(Status) ? 0 : sizeof(Module));
     RuntimeRecord(DBG_RT_REQUEST_DONE, Status, Request->Command, Module.Base,
                   Module.Size);
+    RuntimeFlush();
     gRuntimeTraceActive = 0;
     return Status;
   }
@@ -1201,6 +1346,7 @@ static EFI_STATUS HandleRequest(REQUEST *Request, RESPONSE *Response) {
       Reply(Response, Request, EFI_INVALID_PARAMETER, 0, 0, 0);
       RuntimeRecord(DBG_RT_REQUEST_DONE, EFI_INVALID_PARAMETER,
                     Request->Command, Request->DataSize, sizeof(MODULE_INFO));
+      RuntimeFlush();
       gRuntimeTraceActive = 0;
       return EFI_INVALID_PARAMETER;
     }
@@ -1212,11 +1358,13 @@ static EFI_STATUS HandleRequest(REQUEST *Request, RESPONSE *Response) {
                            &Address);
     Reply(Response, Request, Status, Address, 0, 0);
     RuntimeRecord(DBG_RT_REQUEST_DONE, Status, Request->Command, Address, 0);
+    RuntimeFlush();
     gRuntimeTraceActive = 0;
     return Status;
   }
   Reply(Response, Request, EFI_UNSUPPORTED, 0, 0, 0);
   RuntimeRecord(DBG_RT_REQUEST_DONE, EFI_UNSUPPORTED, Request->Command, 0, 0);
+  RuntimeFlush();
   gRuntimeTraceActive = 0;
   return EFI_UNSUPPORTED;
 }
