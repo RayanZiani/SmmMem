@@ -10,7 +10,7 @@ if errorlevel 1 (
     exit /b 1
 )
 
-set "OUT=Work\build_debug03"
+set "OUT=Work\build_debug04"
 mkdir "%OUT%" 2>nul
 del /q "%OUT%\*.obj" "%OUT%\*.efi" "%OUT%\*.exe" 2>nul
 

@@ -136,6 +136,12 @@ static const char *StageName(uint32_t Stage) {
   case 0x440: return "SMM map PTE";
   case 0x450: return "SMM map done";
   case 0x460: return "copy begin";
+  case 0x470: return "SMM map enable";
+  case 0x480: return "SMM map reload";
+  case 0x490: return "window init";
+  case 0x4A0: return "window map";
+  case 0x4B0: return "window copy";
+  case 0x4C0: return "window done";
   default: return "unknown";
   }
 }

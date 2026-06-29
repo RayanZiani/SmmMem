@@ -4,6 +4,7 @@
 #pragma intrinsic(__inbyte)
 #pragma intrinsic(__outbyte)
 #pragma intrinsic(__readcr3)
+#pragma intrinsic(__writecr3)
 #pragma intrinsic(__readmsr)
 #pragma intrinsic(__cpuidex)
 #pragma function(memset)
@@ -13,8 +14,14 @@
 #define PAGE_MASK 0xFFFFFFFFFFFFF000ULL
 #define LARGE_PAGE_SIZE 0x200000ULL
 #define LARGE_PAGE_MASK 0xFFFFFFFFFFE00000ULL
+#define HUGE_PAGE_MASK 0xFFFFFFFFC0000000ULL
+#define HIGH_PHYS_BASE 0x100000000ULL
 #define PTE_PRESENT 1ULL
+#define PTE_RW 2ULL
 #define PTE_LARGE (1ULL << 7)
+#define PAGE_TABLE_FLAGS (PTE_PRESENT | PTE_RW)
+#define PAGE_LEAF_FLAGS (PTE_PRESENT | PTE_RW)
+#define EFI_RUNTIME_SERVICES_DATA 6U
 #define MSR_LSTAR 0xC0000082U
 #define SAVE_STATE_CR3 53U
 
@@ -29,6 +36,9 @@ typedef EFI_STATUS(EFIAPI *WRITE_SAVE_STATE)(const EFI_SMM_CPU_PROTOCOL *This,
 typedef EFI_STATUS(EFIAPI *SMM_CPU_IO)(const EFI_SMM_CPU_IO2_PROTOCOL *This,
                                        UINT32 Width, UINT64 Address,
                                        UINTN Count, VOID *Buffer);
+typedef EFI_STATUS(EFIAPI *SMM_ALLOCATE_PAGES)(EFI_ALLOCATE_TYPE Type,
+                                               UINT32 MemoryType, UINTN Pages,
+                                               EFI_PHYSICAL_ADDRESS *Memory);
 
 struct EFI_SMM_CPU_PROTOCOL {
   READ_SAVE_STATE ReadSaveState;
@@ -68,6 +78,11 @@ static UINT32 gCopyPhysTraceCount;
 static UINT32 gHighPhysTraceCount;
 static UINT32 gTranslateTraceCount;
 static UINT32 gKernelScanTraceCount;
+static UINT32 gMapReady;
+static UINT64 gMapWindow;
+static UINT64 gMapPdpt;
+static UINT64 gMapPd;
+static UINT64 gMapPt;
 static CHAR16 gSmmDebugName[] = {
     'S', 'm', 'm', 'M', 'e', 'm', 'S', 'm', 'm', 'D', 'e', 'b', 'u', 'g', 0};
 static CHAR16 gRuntimeTraceName[] = {
@@ -301,20 +316,19 @@ static BOOLEAN IsUserPtr(UINT64 Value) {
 static UINT64 PhysMask(VOID);
 
 static BOOLEAN IsHighPhysicalCopy(UINT64 Address, UINTN Size) {
-  if (Address >= 0x100000000ULL) {
-    return 1;
+  if (Size == 0) {
+    return 0;
   }
-  if (Size != 0 && Address > 0x100000000ULL - (UINT64)Size) {
-    return 1;
-  }
-  return 0;
+  return Address >= HIGH_PHYS_BASE ||
+         Address + Size - 1ULL >= HIGH_PHYS_BASE;
 }
 
-static EFI_STATUS TraceSmmMapping(UINT64 Address) {
+static EFI_STATUS TraceSmmMapping(UINT64 Address, BOOLEAN EnableMissing) {
   volatile UINT64 *EntryPtr;
   UINT64 Cr3;
   UINT64 Mask;
   UINT64 Entry;
+  UINT64 NewEntry;
   UINT64 Base;
   UINT64 Index;
 
@@ -349,6 +363,24 @@ static EFI_STATUS TraceSmmMapping(UINT64 Address) {
                 Entry, Index);
   RuntimeFlush();
   if ((Entry & PTE_PRESENT) == 0) {
+    if (EnableMissing != 0 && Address >= HIGH_PHYS_BASE &&
+        (Entry & PTE_LARGE) != 0 &&
+        ((Entry & Mask) & HUGE_PAGE_MASK) == (Address & HUGE_PAGE_MASK)) {
+      NewEntry = Entry | PTE_PRESENT;
+      RuntimeRecord(DBG_RT_SMM_MAP_ENABLE, EFI_SUCCESS,
+                    (UINT64)(UINTN)EntryPtr, Entry, NewEntry);
+      RuntimeFlush();
+      *EntryPtr = NewEntry;
+      __writecr3(__readcr3());
+      Entry = *EntryPtr;
+      RuntimeRecord(DBG_RT_SMM_MAP_RELOAD, EFI_SUCCESS, Cr3, Entry, Index);
+      RuntimeFlush();
+      if ((Entry & PTE_PRESENT) != 0) {
+        RuntimeRecord(DBG_RT_SMM_MAP_DONE, EFI_SUCCESS, Address, 3, Entry);
+        RuntimeFlush();
+        return EFI_SUCCESS;
+      }
+    }
     RuntimeRecord(DBG_RT_SMM_MAP_DONE, EFI_NOT_FOUND, Address, 3, Entry);
     RuntimeFlush();
     return EFI_NOT_FOUND;
@@ -401,41 +433,159 @@ static EFI_STATUS TraceSmmMapping(UINT64 Address) {
   return EFI_SUCCESS;
 }
 
+static EFI_STATUS InitMapWindow(BOOLEAN Log) {
+  SMM_ALLOCATE_PAGES AllocatePages;
+  volatile UINT64 *Pml4;
+  UINT64 Cr3;
+  UINT64 Mask;
+  EFI_PHYSICAL_ADDRESS Memory;
+  EFI_STATUS Status;
+  UINTN Index;
+
+  if (gMapReady != 0) {
+    return EFI_SUCCESS;
+  }
+  if (gSmst == 0 || gSmst->SmmAllocatePages == 0) {
+    return EFI_UNSUPPORTED;
+  }
+  Cr3 = __readcr3() & PAGE_MASK;
+  Mask = PhysMask();
+  Pml4 = (volatile UINT64 *)(UINTN)(Cr3 & Mask);
+  for (Index = 1; Index < 256; Index++) {
+    if ((Pml4[Index] & PTE_PRESENT) == 0) {
+      break;
+    }
+  }
+  if (Index == 256) {
+    if (Log != 0) {
+      RuntimeRecord(DBG_RT_WINDOW_INIT, EFI_OUT_OF_RESOURCES, Cr3, 0, 0);
+      RuntimeFlush();
+    }
+    return EFI_OUT_OF_RESOURCES;
+  }
+  AllocatePages = (SMM_ALLOCATE_PAGES)gSmst->SmmAllocatePages;
+  Memory = 0xFFFFFFFFULL;
+  Status = AllocatePages(AllocateMaxAddress, EFI_RUNTIME_SERVICES_DATA, 3,
+                         &Memory);
+  if (EFI_ERROR(Status)) {
+    if (Log != 0) {
+      RuntimeRecord(DBG_RT_WINDOW_INIT, Status, Cr3, Index, 0);
+      RuntimeFlush();
+    }
+    return Status;
+  }
+  ZeroMem((VOID *)(UINTN)Memory, (UINTN)(PAGE_SIZE * 3));
+  gMapPdpt = Memory;
+  gMapPd = Memory + PAGE_SIZE;
+  gMapPt = Memory + PAGE_SIZE * 2;
+  gMapWindow = ((UINT64)Index) << 39;
+
+  ((volatile UINT64 *)(UINTN)gMapPdpt)[0] =
+      (gMapPd & Mask) | PAGE_TABLE_FLAGS;
+  ((volatile UINT64 *)(UINTN)gMapPd)[0] = (gMapPt & Mask) | PAGE_TABLE_FLAGS;
+  Pml4[Index] = (gMapPdpt & Mask) | PAGE_TABLE_FLAGS;
+  __writecr3(__readcr3());
+  gMapReady = 1;
+  if (Log != 0) {
+    RuntimeRecord(DBG_RT_WINDOW_INIT, EFI_SUCCESS, gMapWindow, Memory, Index);
+    RuntimeFlush();
+  }
+  return EFI_SUCCESS;
+}
+
+static EFI_STATUS MapWindowPage(UINT64 Address, BOOLEAN Log) {
+  UINT64 Mask;
+  UINT64 Entry;
+  EFI_STATUS Status;
+
+  Status = InitMapWindow(Log);
+  if (EFI_ERROR(Status)) {
+    return Status;
+  }
+  Mask = PhysMask();
+  Entry = (Address & Mask) | PAGE_LEAF_FLAGS;
+  ((volatile UINT64 *)(UINTN)gMapPt)[0] = Entry;
+  __writecr3(__readcr3());
+  if (Log != 0) {
+    RuntimeRecord(DBG_RT_WINDOW_MAP, EFI_SUCCESS, gMapWindow, Address, Entry);
+    RuntimeFlush();
+  }
+  return EFI_SUCCESS;
+}
+
+static EFI_STATUS CopyPhysWindow(UINT64 Address, VOID *Buffer, UINTN Size,
+                                 BOOLEAN Write, BOOLEAN Log) {
+  volatile UINT8 *Window;
+  UINT8 *Bytes;
+  EFI_STATUS Status;
+  UINTN Chunk;
+  UINTN Index;
+  UINT64 Page;
+
+  Bytes = (UINT8 *)Buffer;
+  while (Size != 0) {
+    Page = Address & PAGE_MASK;
+    Chunk = (UINTN)(PAGE_SIZE - (Address & (PAGE_SIZE - 1)));
+    if (Chunk > Size) {
+      Chunk = Size;
+    }
+    Status = MapWindowPage(Page, Log);
+    if (EFI_ERROR(Status)) {
+      if (Log != 0) {
+        RuntimeRecord(DBG_RT_WINDOW_DONE, Status, Address, Size, Write);
+        RuntimeFlush();
+      }
+      return Status;
+    }
+    Window = (volatile UINT8 *)(UINTN)(gMapWindow + (Address & (PAGE_SIZE - 1)));
+    if (Log != 0) {
+      RuntimeRecord(DBG_RT_WINDOW_COPY, EFI_SUCCESS, Address, Chunk, Write);
+      RuntimeFlush();
+    }
+    for (Index = 0; Index < Chunk; Index++) {
+      if (Write) {
+        Window[Index] = Bytes[Index];
+      } else {
+        Bytes[Index] = Window[Index];
+      }
+    }
+    Address += Chunk;
+    Bytes += Chunk;
+    Size -= Chunk;
+    Log = 0;
+  }
+  return EFI_SUCCESS;
+}
+
 static EFI_STATUS CopyPhys(UINT64 Address, VOID *Buffer, UINTN Size,
                            BOOLEAN Write) {
   SMM_CPU_IO Access;
   EFI_STATUS Status;
-  BOOLEAN HighTrace;
+  BOOLEAN HighCopy;
+  BOOLEAN LogHighCopy;
 
-  HighTrace = gRuntimeTraceActive != 0 &&
-              IsHighPhysicalCopy(Address, Size) &&
-              gHighPhysTraceCount < 8;
+  HighCopy = IsHighPhysicalCopy(Address, Size);
+  LogHighCopy = (gRuntimeTraceActive != 0 && HighCopy != 0 &&
+                 gHighPhysTraceCount < 16);
+  if (HighCopy != 0) {
+    if (LogHighCopy != 0) {
+      RuntimeRecord(DBG_RT_COPY_PHYS, EFI_SUCCESS, Address, Size, Write);
+      RuntimeFlush();
+      TraceSmmMapping(Address, 0);
+    }
+    gHighPhysTraceCount++;
+    return CopyPhysWindow(Address, Buffer, Size, Write, LogHighCopy);
+  }
   if (gRuntimeTraceActive != 0 && gCopyPhysTraceCount < 32) {
     RuntimeRecord(DBG_RT_COPY_PHYS, EFI_SUCCESS, Address, Size, Write);
     gCopyPhysTraceCount++;
   }
-  if (HighTrace) {
-    gHighPhysTraceCount++;
-    RuntimeRecord(DBG_RT_COPY_PHYS, EFI_SUCCESS, Address, Size,
-                  Write | 0x100ULL);
-    RuntimeFlush();
-    Status = TraceSmmMapping(Address);
-    if (EFI_ERROR(Status)) {
-      return Status;
-    }
-  }
   Access = (SMM_CPU_IO)(Write ? gSmst->SmmIo.Mem.Write
                               : gSmst->SmmIo.Mem.Read);
-  if (HighTrace) {
-    RuntimeRecord(DBG_RT_COPY_BEGIN, EFI_SUCCESS, Address, Size, Write);
-    RuntimeFlush();
-  }
   Status = Access(&gSmst->SmmIo, 0, Address, Size, Buffer);
-  if (gRuntimeTraceActive != 0 && (EFI_ERROR(Status) || HighTrace)) {
+  if (gRuntimeTraceActive != 0 && EFI_ERROR(Status)) {
     RuntimeRecord(DBG_RT_COPY_PHYS, Status, Address, Size, Write);
-    if (HighTrace || EFI_ERROR(Status)) {
-      RuntimeFlush();
-    }
+    RuntimeFlush();
   }
   return Status;
 }
