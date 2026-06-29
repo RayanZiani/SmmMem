@@ -43,11 +43,21 @@ static EFI_PHYSICAL_ADDRESS gMailboxPhysical;
 static EFI_EVENT gRetryTimerEvent;
 static EFI_EVENT gReadyToBootEvent;
 static EFI_EVENT gSmmCommEvent;
+static EFI_EVENT gAcpiEvent;
 static VOID *gSmmCommRegistration;
+static VOID *gAcpiRegistration;
 static UINT32 gConfigured;
 static UINT32 gConfigureAttempts;
+static UINT32 gWmiInstalled;
+static UINT32 gWmiAttempts;
 static CONFIG gPublishedConfig;
+static DEBUG_STATE gDebugState;
+static DEBUG_TRACE gDebugTrace;
 static UINT8 gSsdt[512];
+static CHAR16 gDebugName[] = {
+    'S', 'm', 'm', 'M', 'e', 'm', 'D', 'e', 'b', 'u', 'g', 0};
+static CHAR16 gTraceName[] = {
+    'S', 'm', 'm', 'M', 'e', 'm', 'T', 'r', 'a', 'c', 'e', 0};
 
 static EFI_GUID gEfiEventReadyToBootGuid = {
     0x7ce88fb3,
@@ -73,6 +83,78 @@ static VOID ZeroMem(VOID *Buffer, UINTN Size) {
   while (Size--) {
     *Ptr++ = 0;
   }
+}
+
+static VOID CopyAscii(char *Destination, const char *Source, UINTN Size) {
+  if (Size == 0) {
+    return;
+  }
+  while (Size > 1 && *Source != 0) {
+    *Destination++ = *Source++;
+    Size--;
+  }
+  *Destination = 0;
+}
+
+static VOID SaveDebug(VOID) {
+  UINT32 VolatileAttributes;
+  UINT32 TraceAttributes;
+
+  if (gSystemTable == 0 || gSystemTable->RuntimeServices == 0 ||
+      gSystemTable->RuntimeServices->SetVariable == 0) {
+    return;
+  }
+  gDebugState.Magic = DEBUG_MAGIC;
+  gDebugState.MailboxPhysical = gMailboxPhysical;
+  gDebugState.MailboxSize = MAILBOX_SIZE;
+  gDebugState.SwSmiValue = SW_SMI_VALUE;
+  gDebugState.WmiInstalled = gWmiInstalled;
+  gDebugState.SmmConfigured = gConfigured;
+  gDebugState.ConfigureAttempts = gConfigureAttempts;
+  gDebugTrace.Magic = DEBUG_TRACE_MAGIC;
+  gDebugTrace.LastStage = gDebugState.DxeStage;
+  gDebugTrace.LastStatus = gDebugState.DxeStatus;
+  gDebugTrace.State = gDebugState;
+  VolatileAttributes =
+      EFI_VARIABLE_BOOTSERVICE_ACCESS | EFI_VARIABLE_RUNTIME_ACCESS;
+  TraceAttributes = EFI_VARIABLE_NON_VOLATILE |
+                    EFI_VARIABLE_BOOTSERVICE_ACCESS |
+                    EFI_VARIABLE_RUNTIME_ACCESS;
+  gSystemTable->RuntimeServices->SetVariable(
+      gDebugName, &gDebugGuid, VolatileAttributes, sizeof(gDebugState),
+      &gDebugState);
+  gSystemTable->RuntimeServices->SetVariable(
+      gTraceName, &gDebugGuid, TraceAttributes, sizeof(gDebugTrace),
+      &gDebugTrace);
+}
+
+static VOID DebugRecord(UINT32 Stage, EFI_STATUS Status, UINT64 Data0,
+                        UINT64 Data1, UINT64 Data2) {
+  UINT32 Index;
+
+  gDebugState.DxeStage = Stage;
+  gDebugState.DxeStatus = (UINT32)Status;
+  if (gDebugTrace.RecordCount < DEBUG_RECORD_COUNT) {
+    Index = gDebugTrace.RecordCount++;
+  } else {
+    Index = DEBUG_RECORD_COUNT - 1;
+    CopyMemLocal(&gDebugTrace.Records[0], &gDebugTrace.Records[1],
+                 sizeof(DEBUG_RECORD) * (DEBUG_RECORD_COUNT - 1));
+  }
+  gDebugTrace.Records[Index].Stage = Stage;
+  gDebugTrace.Records[Index].Status = Status;
+  gDebugTrace.Records[Index].Data0 = Data0;
+  gDebugTrace.Records[Index].Data1 = Data1;
+  gDebugTrace.Records[Index].Data2 = Data2;
+  SaveDebug();
+}
+
+static VOID DebugInit(VOID) {
+  ZeroMem(&gDebugState, sizeof(gDebugState));
+  ZeroMem(&gDebugTrace, sizeof(gDebugTrace));
+  gDebugTrace.Magic = DEBUG_TRACE_MAGIC;
+  CopyAscii(gDebugTrace.Build, __DATE__ " " __TIME__,
+            sizeof(gDebugTrace.Build));
 }
 
 VOID *memset(VOID *Destination, int Value, size_t Size) {
@@ -375,27 +457,59 @@ static EFI_STATUS InstallWmi(VOID) {
   EFI_STATUS Status;
   UINTN TableKey;
   UINTN TableSize;
+  UINT32 Attempt;
+  BOOLEAN LogIt;
 
+  if (gWmiInstalled != 0) {
+    return EFI_SUCCESS;
+  }
+  Attempt = ++gWmiAttempts;
+  LogIt = (Attempt <= 3);
+  if (LogIt) {
+    Log("dxe install wmi attempt=0x");
+    LogHex(Attempt);
+    Log("\n");
+  }
   Status = gSystemTable->BootServices->LocateProtocol(
       &gEfiAcpiTableProtocolGuid, 0, (VOID **)&AcpiTable);
   if (EFI_ERROR(Status) || AcpiTable == 0) {
-    LogStatus("dxe acpi protocol failed ",
-              EFI_ERROR(Status) ? Status : EFI_NOT_FOUND);
+    DebugRecord(DBG_DXE_ACPI_LOCATE,
+                EFI_ERROR(Status) ? Status : EFI_NOT_FOUND,
+                (UINT64)(UINTN)AcpiTable, Attempt, 0);
+    if (LogIt) {
+      LogStatus("dxe acpi protocol unavailable ",
+                EFI_ERROR(Status) ? Status : EFI_NOT_FOUND);
+    }
     return EFI_ERROR(Status) ? Status : EFI_NOT_FOUND;
   }
+  DebugRecord(DBG_DXE_ACPI_LOCATE, EFI_SUCCESS, (UINT64)(UINTN)AcpiTable,
+              Attempt, 0);
   TableSize = BuildSsdt(gSsdt, sizeof(gSsdt));
   if (TableSize == 0) {
-    Log("dxe ssdt build failed\n");
+    DebugRecord(DBG_DXE_SSDT_BUILT, EFI_OUT_OF_RESOURCES,
+                sizeof(gSsdt), Attempt, 0);
+    if (LogIt) {
+      Log("dxe ssdt build failed\n");
+    }
     return EFI_OUT_OF_RESOURCES;
   }
-  Log("dxe ssdt size=0x");
-  LogHex(TableSize);
-  Log("\n");
+  DebugRecord(DBG_DXE_SSDT_BUILT, EFI_SUCCESS, TableSize, Attempt, 0);
+  if (LogIt) {
+    Log("dxe ssdt size=0x");
+    LogHex(TableSize);
+    Log("\n");
+  }
   Status = AcpiTable->InstallAcpiTable(AcpiTable, gSsdt, TableSize,
                                        &TableKey);
   if (EFI_ERROR(Status)) {
-    LogStatus("dxe ssdt install failed ", Status);
+    DebugRecord(DBG_DXE_SSDT_INSTALLED, Status, TableSize, Attempt, 0);
+    if (LogIt) {
+      LogStatus("dxe ssdt install failed ", Status);
+    }
   } else {
+    gWmiInstalled = 1;
+    DebugRecord(DBG_DXE_SSDT_INSTALLED, EFI_SUCCESS, TableSize, TableKey,
+                Attempt);
     Log("dxe ssdt installed\n");
   }
   return Status;
@@ -414,6 +528,8 @@ static EFI_STATUS PublishConfig(VOID) {
   gPublishedConfig.SwSmiValue = SW_SMI_VALUE;
   Status = gSystemTable->BootServices->InstallConfigurationTable(
       &gConfigGuid, &gPublishedConfig);
+  DebugRecord(DBG_DXE_CONFIG_PUBLISHED, Status, gMailboxPhysical,
+              MAILBOX_SIZE, SW_SMI_VALUE);
   return Status;
 }
 
@@ -541,20 +657,28 @@ static EFI_STATUS ConfigureSmm(VOID) {
   Status = gSystemTable->BootServices->LocateProtocol(
       &gEfiSmmCommunicationProtocolGuid, 0, (VOID **)&SmmComm);
   if (EFI_ERROR(Status) || SmmComm == 0) {
+    DebugRecord(DBG_DXE_SMM_LOCATE,
+                EFI_ERROR(Status) ? Status : EFI_NOT_FOUND,
+                (UINT64)(UINTN)SmmComm, Attempt, 0);
     if (LogIt) {
       LogStatus("dxe smm communication unavailable ",
                 EFI_ERROR(Status) ? Status : EFI_NOT_FOUND);
     }
     return EFI_ERROR(Status) ? Status : EFI_NOT_FOUND;
   }
+  DebugRecord(DBG_DXE_SMM_LOCATE, EFI_SUCCESS, (UINT64)(UINTN)SmmComm,
+              Attempt, 0);
   CommSize = sizeof(EFI_SMM_COMMUNICATE_HEADER) + sizeof(CONFIG) + 16;
   CommBuffer = FindSmmCommRegion(CommSize, &OriginalRegionType, LogIt);
   if (CommBuffer == 0) {
+    DebugRecord(DBG_DXE_SMM_COMM_REGION, EFI_NOT_FOUND, CommSize, Attempt, 0);
     if (LogIt) {
       Log("dxe smm configure no comm buffer\n");
     }
     return EFI_NOT_FOUND;
   }
+  DebugRecord(DBG_DXE_SMM_COMM_REGION, EFI_SUCCESS,
+              (UINT64)(UINTN)CommBuffer, CommSize, OriginalRegionType);
   ZeroMem(CommBuffer, CommSize);
   Header = (EFI_SMM_COMMUNICATE_HEADER *)CommBuffer;
   Header->HeaderGuid = gConfigCommGuid;
@@ -568,45 +692,57 @@ static EFI_STATUS ConfigureSmm(VOID) {
   RestoreSmmCommRegionType(CommBuffer, OriginalRegionType);
   if (!EFI_ERROR(Status)) {
     gConfigured = 1;
+    DebugRecord(DBG_DXE_SMM_CONFIGURED, EFI_SUCCESS, CommSize, Attempt, 0);
     Log("dxe smm configure ok\n");
-  } else if (LogIt) {
-    LogStatus("dxe smm communicate failed ", Status);
-    Log("dxe smm communicate size=0x");
-    LogHex(CommSize);
-    Log("\n");
+  } else {
+    DebugRecord(DBG_DXE_SMM_CONFIGURED, Status, CommSize, Attempt, 0);
+    if (LogIt) {
+      LogStatus("dxe smm communicate failed ", Status);
+      Log("dxe smm communicate size=0x");
+      LogHex(CommSize);
+      Log("\n");
+    }
   }
   return Status;
 }
 
-static VOID EFIAPI RetryConfigureSmm(EFI_EVENT Event, VOID *Context) {
-  EFI_STATUS Status;
+static VOID EFIAPI RetrySetup(EFI_EVENT Event, VOID *Context) {
+  EFI_STATUS WmiStatus;
+  EFI_STATUS SmmStatus;
   (void)Event;
   (void)Context;
 
-  if (gConfigured != 0) {
+  if (gWmiInstalled != 0 && gConfigured != 0) {
     return;
   }
-  Status = ConfigureSmm();
-  if (!EFI_ERROR(Status) && gRetryTimerEvent != 0) {
-    Status = gSystemTable->BootServices->SetTimer(gRetryTimerEvent,
-                                                  TimerCancel, 0);
-    if (EFI_ERROR(Status)) {
-      LogStatus("dxe retry timer cancel failed ", Status);
+  WmiStatus = EFI_SUCCESS;
+  SmmStatus = EFI_SUCCESS;
+  if (gWmiInstalled == 0) {
+    WmiStatus = InstallWmi();
+  }
+  if (gConfigured == 0) {
+    SmmStatus = ConfigureSmm();
+  }
+  if (!EFI_ERROR(WmiStatus) && !EFI_ERROR(SmmStatus) &&
+      gRetryTimerEvent != 0) {
+    SmmStatus = gSystemTable->BootServices->SetTimer(gRetryTimerEvent,
+                                                     TimerCancel, 0);
+    if (EFI_ERROR(SmmStatus)) {
+      LogStatus("dxe retry timer cancel failed ", SmmStatus);
     } else {
       Log("dxe retry timer canceled\n");
     }
-    (void)Status;
   }
 }
 
 static VOID RegisterRetryTimer(VOID) {
   EFI_STATUS Status;
 
-  if (gRetryTimerEvent != 0 || gConfigured != 0) {
+  if (gRetryTimerEvent != 0 || (gWmiInstalled != 0 && gConfigured != 0)) {
     return;
   }
   Status = gSystemTable->BootServices->CreateEvent(
-      EVT_TIMER | EVT_NOTIFY_SIGNAL, TPL_CALLBACK, RetryConfigureSmm, 0,
+      EVT_TIMER | EVT_NOTIFY_SIGNAL, TPL_CALLBACK, RetrySetup, 0,
       &gRetryTimerEvent);
   if (EFI_ERROR(Status)) {
     gRetryTimerEvent = 0;
@@ -631,8 +767,7 @@ static VOID RegisterSmmCommNotify(VOID) {
     return;
   }
   Status = gSystemTable->BootServices->CreateEvent(
-      EVT_NOTIFY_SIGNAL, TPL_CALLBACK, RetryConfigureSmm, 0,
-      &gSmmCommEvent);
+      EVT_NOTIFY_SIGNAL, TPL_CALLBACK, RetrySetup, 0, &gSmmCommEvent);
   if (EFI_ERROR(Status)) {
     gSmmCommEvent = 0;
     LogStatus("dxe smm communication notify create failed ", Status);
@@ -650,10 +785,34 @@ static VOID RegisterSmmCommNotify(VOID) {
   }
 }
 
+static VOID RegisterAcpiNotify(VOID) {
+  EFI_STATUS Status;
+
+  if (gAcpiEvent != 0 || gWmiInstalled != 0) {
+    return;
+  }
+  Status = gSystemTable->BootServices->CreateEvent(
+      EVT_NOTIFY_SIGNAL, TPL_CALLBACK, RetrySetup, 0, &gAcpiEvent);
+  if (EFI_ERROR(Status)) {
+    gAcpiEvent = 0;
+    LogStatus("dxe acpi notify create failed ", Status);
+    return;
+  }
+  Status = gSystemTable->BootServices->RegisterProtocolNotify(
+      &gEfiAcpiTableProtocolGuid, gAcpiEvent, &gAcpiRegistration);
+  if (EFI_ERROR(Status)) {
+    gSystemTable->BootServices->CloseEvent(gAcpiEvent);
+    gAcpiEvent = 0;
+    LogStatus("dxe acpi notify failed ", Status);
+  } else {
+    Log("dxe acpi notify registered\n");
+  }
+}
+
 static VOID RegisterReadyToBootRetry(VOID) {
   EFI_STATUS Status;
 
-  if (gReadyToBootEvent != 0 || gConfigured != 0 ||
+  if (gReadyToBootEvent != 0 || (gWmiInstalled != 0 && gConfigured != 0) ||
       gSystemTable->BootServices->CreateEventEx == 0) {
     if (gSystemTable->BootServices->CreateEventEx == 0) {
       Log("dxe ready retry unavailable\n");
@@ -661,7 +820,7 @@ static VOID RegisterReadyToBootRetry(VOID) {
     return;
   }
   Status = gSystemTable->BootServices->CreateEventEx(
-      EVT_NOTIFY_SIGNAL, TPL_CALLBACK, RetryConfigureSmm, 0,
+      EVT_NOTIFY_SIGNAL, TPL_CALLBACK, RetrySetup, 0,
       &gEfiEventReadyToBootGuid, &gReadyToBootEvent);
   if (EFI_ERROR(Status)) {
     gReadyToBootEvent = 0;
@@ -677,13 +836,18 @@ EFI_STATUS EFIAPI DxeEntry(EFI_HANDLE ImageHandle,
   (void)ImageHandle;
 
   gSystemTable = SystemTable;
+  DebugInit();
   SerialInit();
+  DebugRecord(DBG_DXE_ENTRY, EFI_SUCCESS, 0, 0, 0);
   Log("mem dxe init\n");
   Status = AllocateMailbox();
   if (EFI_ERROR(Status)) {
+    DebugRecord(DBG_DXE_MAILBOX_OK, Status, MAILBOX_SIZE, 0, 0);
     LogStatus("dxe mailbox failed ", Status);
     return EFI_SUCCESS;
   }
+  DebugRecord(DBG_DXE_MAILBOX_OK, EFI_SUCCESS, gMailboxPhysical,
+              MAILBOX_SIZE, SW_SMI_VALUE);
   Log("dxe mailbox base=0x");
   LogHex(gMailboxPhysical);
   Log(" size=0x");
@@ -702,11 +866,14 @@ EFI_STATUS EFIAPI DxeEntry(EFI_HANDLE ImageHandle,
     LogStatus("dxe wmi install failed ", Status);
   }
   Status = ConfigureSmm();
-  if (EFI_ERROR(Status)) {
+  if (gWmiInstalled == 0 || gConfigured == 0) {
     RegisterRetryTimer();
     RegisterReadyToBootRetry();
     RegisterSmmCommNotify();
+    RegisterAcpiNotify();
   }
+  DebugRecord(DBG_DXE_DONE, EFI_SUCCESS, gWmiInstalled, gConfigured,
+              gConfigureAttempts);
   Log("mem dxe done\n");
   return EFI_SUCCESS;
 }

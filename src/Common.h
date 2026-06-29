@@ -51,8 +51,49 @@ typedef UINT64 EFI_PHYSICAL_ADDRESS;
 
 #define STATUS_OK 0U
 #define EFI_RUNTIME_SERVICES_DATA 6U
+#define EFI_VARIABLE_NON_VOLATILE 0x00000001U
+#define EFI_VARIABLE_BOOTSERVICE_ACCESS 0x00000002U
+#define EFI_VARIABLE_RUNTIME_ACCESS 0x00000004U
 #define SERIAL 1U
 #define COM1_PORT 0x3F8U
+#define DEBUG_MAGIC 0x4742444D454D4D53ULL
+#define DEBUG_TRACE_MAGIC 0x45434152544D4D53ULL
+#define DEBUG_RECORD_COUNT 128U
+
+#define DBG_DXE_ENTRY 0x100U
+#define DBG_DXE_MAILBOX_OK 0x110U
+#define DBG_DXE_CONFIG_PUBLISHED 0x120U
+#define DBG_DXE_ACPI_LOCATE 0x130U
+#define DBG_DXE_SSDT_BUILT 0x140U
+#define DBG_DXE_SSDT_INSTALLED 0x150U
+#define DBG_DXE_SMM_LOCATE 0x160U
+#define DBG_DXE_SMM_COMM_REGION 0x170U
+#define DBG_DXE_SMM_CONFIGURED 0x180U
+#define DBG_DXE_DONE 0x1FFU
+
+#define DBG_SMM_ENTRY 0x200U
+#define DBG_SMM_SMST_OK 0x210U
+#define DBG_SMM_COMM_REGISTERED 0x220U
+#define DBG_SMM_CONFIG_APPLIED 0x230U
+#define DBG_SMM_SW_REGISTERED 0x240U
+#define DBG_SMM_DONE 0x2FFU
+
+#define DBG_RT_REQUEST 0x300U
+#define DBG_RT_FIND_PROCESS_NAME 0x310U
+#define DBG_RT_FIND_PROCESS_PID 0x320U
+#define DBG_RT_RESOLVE_LAYOUT 0x330U
+#define DBG_RT_INIT_KERNEL 0x340U
+#define DBG_RT_SAVED_CR3 0x350U
+#define DBG_RT_TRY_CR3 0x360U
+#define DBG_RT_KERNEL_SCAN 0x370U
+#define DBG_RT_COPY_PHYS 0x380U
+#define DBG_RT_TRANSLATE 0x390U
+#define DBG_RT_RESOLVE_LIST 0x3A0U
+#define DBG_RT_RESOLVE_CR3 0x3B0U
+#define DBG_RT_RESOLVE_NAME 0x3C0U
+#define DBG_RT_FILL_PROCESS 0x3D0U
+#define DBG_RT_FIND_MODULE 0x3E0U
+#define DBG_RT_REQUEST_DONE 0x3F0U
 
 typedef struct {
   UINT32 Data1;
@@ -76,11 +117,13 @@ typedef struct {
 
 typedef struct EFI_BOOT_SERVICES EFI_BOOT_SERVICES;
 typedef struct EFI_SYSTEM_TABLE EFI_SYSTEM_TABLE;
+typedef struct EFI_RUNTIME_SERVICES EFI_RUNTIME_SERVICES;
 typedef struct EFI_ACPI_TABLE_PROTOCOL EFI_ACPI_TABLE_PROTOCOL;
 typedef struct EFI_SMM_COMMUNICATION_PROTOCOL EFI_SMM_COMMUNICATION_PROTOCOL;
 typedef struct EFI_SMM_BASE2_PROTOCOL EFI_SMM_BASE2_PROTOCOL;
 typedef struct EFI_SMM_SYSTEM_TABLE2 EFI_SMM_SYSTEM_TABLE2;
 typedef struct EFI_SMM_SW_DISPATCH2_PROTOCOL EFI_SMM_SW_DISPATCH2_PROTOCOL;
+typedef struct EFI_SMM_VARIABLE_PROTOCOL EFI_SMM_VARIABLE_PROTOCOL;
 
 typedef EFI_STATUS(EFIAPI *EFI_LOCATE_PROTOCOL)(EFI_GUID *Protocol,
                                                 VOID *Registration,
@@ -118,6 +161,14 @@ typedef EFI_STATUS(EFIAPI *EFI_CREATE_EVENT_EX)(UINT32 Type, EFI_TPL NotifyTpl,
                                                 const VOID *NotifyContext,
                                                 const EFI_GUID *EventGroup,
                                                 EFI_EVENT *Event);
+typedef EFI_STATUS(EFIAPI *EFI_SET_VARIABLE)(CHAR16 *VariableName,
+                                             EFI_GUID *VendorGuid,
+                                             UINT32 Attributes,
+                                             UINTN DataSize, VOID *Data);
+typedef EFI_STATUS(EFIAPI *EFI_SMM_SET_VARIABLE)(CHAR16 *VariableName,
+                                                 EFI_GUID *VendorGuid,
+                                                 UINT32 Attributes,
+                                                 UINTN DataSize, VOID *Data);
 
 #define EVT_TIMER 0x80000000U
 #define EVT_NOTIFY_SIGNAL 0x00000100U
@@ -171,6 +222,19 @@ struct EFI_BOOT_SERVICES {
   EFI_CREATE_EVENT_EX CreateEventEx;
 };
 
+struct EFI_RUNTIME_SERVICES {
+  EFI_TABLE_HEADER Hdr;
+  VOID *GetTime;
+  VOID *SetTime;
+  VOID *GetWakeupTime;
+  VOID *SetWakeupTime;
+  VOID *SetVirtualAddressMap;
+  VOID *ConvertPointer;
+  VOID *GetVariable;
+  VOID *GetNextVariableName;
+  EFI_SET_VARIABLE SetVariable;
+};
+
 struct EFI_SYSTEM_TABLE {
   EFI_TABLE_HEADER Hdr;
   CHAR16 *FirmwareVendor;
@@ -181,7 +245,7 @@ struct EFI_SYSTEM_TABLE {
   VOID *ConOut;
   EFI_HANDLE StandardErrorHandle;
   VOID *StdErr;
-  VOID *RuntimeServices;
+  EFI_RUNTIME_SERVICES *RuntimeServices;
   EFI_BOOT_SERVICES *BootServices;
   UINTN NumberOfTableEntries;
   EFI_CONFIGURATION_TABLE *ConfigurationTable;
@@ -258,6 +322,40 @@ typedef struct {
   UINT32 MailboxSize;
   UINT32 SwSmiValue;
 } CONFIG;
+
+typedef struct {
+  UINT64 Magic;
+  UINT32 DxeStage;
+  UINT32 DxeStatus;
+  UINT32 SmmStage;
+  UINT32 SmmStatus;
+  UINT64 MailboxPhysical;
+  UINT32 MailboxSize;
+  UINT32 SwSmiValue;
+  UINT32 WmiInstalled;
+  UINT32 SmmConfigured;
+  UINT32 ConfigureAttempts;
+  UINT32 Reserved;
+} DEBUG_STATE;
+
+typedef struct {
+  UINT32 Stage;
+  UINT32 Reserved;
+  UINT64 Status;
+  UINT64 Data0;
+  UINT64 Data1;
+  UINT64 Data2;
+} DEBUG_RECORD;
+
+typedef struct {
+  UINT64 Magic;
+  char Build[32];
+  UINT32 RecordCount;
+  UINT32 LastStage;
+  UINT32 LastStatus;
+  DEBUG_STATE State;
+  DEBUG_RECORD Records[DEBUG_RECORD_COUNT];
+} DEBUG_TRACE;
 #pragma pack(pop)
 
 typedef EFI_STATUS(EFIAPI *EFI_SMM_HANDLER_ENTRY_POINT2)(
@@ -291,6 +389,16 @@ struct EFI_SMM_SW_DISPATCH2_PROTOCOL {
   EFI_SMM_SW_REGISTER2 Register;
   EFI_SMM_SW_UNREGISTER2 UnRegister;
   UINTN MaximumSwiValue;
+};
+
+struct EFI_SMM_VARIABLE_PROTOCOL {
+  VOID *SmmGetVariable;
+  VOID *SmmGetNextVariableName;
+  EFI_SMM_SET_VARIABLE SmmSetVariable;
+  VOID *SmmQueryVariableInfo;
+  VOID *SmmVariableReadyToBoot;
+  VOID *SmmVariableExitBootServices;
+  VOID *SmmVariableLock;
 };
 
 typedef struct {
@@ -346,6 +454,11 @@ static EFI_GUID gConfigGuid = {
     0x0fa8,
     0x4c86,
     {0x9d, 0x54, 0x54, 0x2d, 0x5c, 0x9d, 0x90, 0x68}};
+static EFI_GUID gDebugGuid = {
+    0x8ef7c961,
+    0x13f3,
+    0x4574,
+    {0xb4, 0x17, 0x7d, 0x99, 0xa1, 0xa5, 0x2a, 0x8d}};
 static EFI_GUID gEfiSmmBase2ProtocolGuid = {
     0xf4ccbfb7,
     0xf6e0,
@@ -356,6 +469,11 @@ static EFI_GUID gEfiSmmSwDispatch2ProtocolGuid = {
     0x5eea,
     0x48c8,
     {0xa1, 0xc1, 0xb5, 0x33, 0x89, 0xf9, 0x89, 0x99}};
+static EFI_GUID gEfiSmmVariableProtocolGuid = {
+    0xed32d533,
+    0x99e6,
+    0x4209,
+    {0x9c, 0xc0, 0x2d, 0x72, 0xcd, 0xd9, 0x98, 0xa7}};
 static EFI_GUID gEfiSmmCommunicationProtocolGuid = {
     0xc68ed8e2,
     0x9dc6,

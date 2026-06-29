@@ -44,6 +44,7 @@ static EFI_GUID gEfiSmmCpuProtocolGuid = {
 static EFI_SYSTEM_TABLE *gSystemTable;
 static EFI_SMM_SYSTEM_TABLE2 *gSmst;
 static EFI_SMM_CPU_PROTOCOL *gSmmCpu;
+static EFI_SMM_VARIABLE_PROTOCOL *gSmmVariable;
 static EFI_PHYSICAL_ADDRESS gMailboxPhysical;
 static UINT32 gMailboxSize;
 static UINT32 gSwSmiValue = SW_SMI_VALUE;
@@ -59,6 +60,18 @@ static UINT32 gNameOffset;
 static UINT32 gPebOffset;
 static UINT32 gCr3Offset;
 static UINT64 gPhysMask;
+static DEBUG_STATE gSmmDebugState;
+static DEBUG_TRACE gRuntimeTrace;
+static UINT32 gRuntimeTraceInit;
+static UINT32 gRuntimeTraceActive;
+static UINT32 gCopyPhysTraceCount;
+static UINT32 gTranslateTraceCount;
+static UINT32 gKernelScanTraceCount;
+static CHAR16 gSmmDebugName[] = {
+    'S', 'm', 'm', 'M', 'e', 'm', 'S', 'm', 'm', 'D', 'e', 'b', 'u', 'g', 0};
+static CHAR16 gRuntimeTraceName[] = {
+    'S', 'm', 'm', 'M', 'e', 'm', 'R', 'u', 'n', 't', 'i', 'm', 'e',
+    'T', 'r', 'a', 'c', 'e', 0};
 
 static VOID CopyMemLocal(VOID *Destination, const VOID *Source, UINTN Size) {
   UINT8 *Dst = (UINT8 *)Destination;
@@ -73,6 +86,83 @@ static VOID ZeroMem(VOID *Buffer, UINTN Size) {
   while (Size--) {
     *Ptr++ = 0;
   }
+}
+
+static VOID SetDebugVariable(CHAR16 *Name, VOID *Data, UINTN Size) {
+  EFI_LOCATE_PROTOCOL Locate;
+  UINT32 Attributes;
+
+  Attributes = EFI_VARIABLE_NON_VOLATILE |
+               EFI_VARIABLE_BOOTSERVICE_ACCESS |
+               EFI_VARIABLE_RUNTIME_ACCESS;
+  if (gSmmVariable == 0 && gSmst != 0 && gSmst->SmmLocateProtocol != 0) {
+    Locate = (EFI_LOCATE_PROTOCOL)gSmst->SmmLocateProtocol;
+    Locate(&gEfiSmmVariableProtocolGuid, 0, (VOID **)&gSmmVariable);
+  }
+  if (gSmmVariable != 0 && gSmmVariable->SmmSetVariable != 0) {
+    gSmmVariable->SmmSetVariable(Name, &gDebugGuid, Attributes, Size, Data);
+    return;
+  }
+  if (gSystemTable != 0 && gSystemTable->RuntimeServices != 0 &&
+      gSystemTable->RuntimeServices->SetVariable != 0) {
+    gSystemTable->RuntimeServices->SetVariable(Name, &gDebugGuid, Attributes,
+                                               Size, Data);
+  }
+}
+
+static VOID SaveSmmDebug(VOID) {
+  gSmmDebugState.Magic = DEBUG_MAGIC;
+  gSmmDebugState.MailboxPhysical = gMailboxPhysical;
+  gSmmDebugState.MailboxSize = gMailboxSize;
+  gSmmDebugState.SwSmiValue = gSwSmiValue;
+  gSmmDebugState.SmmConfigured = gSwHandle != 0;
+  SetDebugVariable(gSmmDebugName, &gSmmDebugState, sizeof(gSmmDebugState));
+}
+
+static VOID DebugSmm(UINT32 Stage, EFI_STATUS Status) {
+  gSmmDebugState.SmmStage = Stage;
+  gSmmDebugState.SmmStatus = (UINT32)Status;
+  SaveSmmDebug();
+}
+
+static VOID InitRuntimeTrace(VOID) {
+  static const char Build[] = __DATE__ " " __TIME__;
+  UINTN Size = sizeof(Build);
+
+  if (gRuntimeTraceInit != 0) {
+    return;
+  }
+  ZeroMem(&gRuntimeTrace, sizeof(gRuntimeTrace));
+  gRuntimeTrace.Magic = DEBUG_TRACE_MAGIC;
+  if (Size > sizeof(gRuntimeTrace.Build)) {
+    Size = sizeof(gRuntimeTrace.Build);
+  }
+  CopyMemLocal(gRuntimeTrace.Build, Build, Size);
+  gRuntimeTraceInit = 1;
+  SetDebugVariable(gRuntimeTraceName, &gRuntimeTrace, sizeof(gRuntimeTrace));
+}
+
+static VOID RuntimeRecord(UINT32 Stage, EFI_STATUS Status, UINT64 Data0,
+                          UINT64 Data1, UINT64 Data2) {
+  UINT32 Index;
+
+  InitRuntimeTrace();
+  if (gRuntimeTrace.RecordCount < DEBUG_RECORD_COUNT) {
+    Index = gRuntimeTrace.RecordCount++;
+  } else {
+    Index = DEBUG_RECORD_COUNT - 1;
+    CopyMemLocal(&gRuntimeTrace.Records[0], &gRuntimeTrace.Records[1],
+                 sizeof(DEBUG_RECORD) * (DEBUG_RECORD_COUNT - 1));
+  }
+  gRuntimeTrace.LastStage = Stage;
+  gRuntimeTrace.LastStatus = (UINT32)Status;
+  gRuntimeTrace.State = gSmmDebugState;
+  gRuntimeTrace.Records[Index].Stage = Stage;
+  gRuntimeTrace.Records[Index].Status = Status;
+  gRuntimeTrace.Records[Index].Data0 = Data0;
+  gRuntimeTrace.Records[Index].Data1 = Data1;
+  gRuntimeTrace.Records[Index].Data2 = Data2;
+  SetDebugVariable(gRuntimeTraceName, &gRuntimeTrace, sizeof(gRuntimeTrace));
 }
 
 VOID *memset(VOID *Destination, int Value, size_t Size) {
@@ -181,6 +271,19 @@ static BOOLEAN SameName(const char *A, const char *B) {
   return *A == 0 && *B == 0;
 }
 
+static UINT64 NameTag(const char *Name) {
+  UINT64 Value = 0;
+  UINTN Index;
+
+  if (Name == 0) {
+    return 0;
+  }
+  for (Index = 0; Index < sizeof(Value) && Name[Index] != 0; Index++) {
+    Value |= ((UINT64)(UINT8)Name[Index]) << (Index * 8);
+  }
+  return Value;
+}
+
 static BOOLEAN IsKernelPtr(UINT64 Value) {
   return Value >= 0xFFFF800000000000ULL;
 }
@@ -192,33 +295,52 @@ static BOOLEAN IsUserPtr(UINT64 Value) {
 static EFI_STATUS CopyPhys(UINT64 Address, VOID *Buffer, UINTN Size,
                            BOOLEAN Write) {
   SMM_CPU_IO Access;
+  EFI_STATUS Status;
 
+  if (gRuntimeTraceActive != 0 && gCopyPhysTraceCount < 96) {
+    RuntimeRecord(DBG_RT_COPY_PHYS, EFI_SUCCESS, Address, Size, Write);
+    gCopyPhysTraceCount++;
+  }
   Access = (SMM_CPU_IO)(Write ? gSmst->SmmIo.Mem.Write
                               : gSmst->SmmIo.Mem.Read);
-  return Access(&gSmst->SmmIo, 0, Address, Size, Buffer);
+  Status = Access(&gSmst->SmmIo, 0, Address, Size, Buffer);
+  if (gRuntimeTraceActive != 0 && EFI_ERROR(Status)) {
+    RuntimeRecord(DBG_RT_COPY_PHYS, Status, Address, Size, Write);
+  }
+  return Status;
 }
 
 static UINT64 PhysMask(VOID) {
   int Regs[4];
+  UINT32 MaxLeaf;
   UINT32 PhysBits;
   UINT32 CBit;
 
   if (gPhysMask != 0) {
     return gPhysMask;
   }
-  __cpuidex(Regs, 0x80000008, 0);
-  PhysBits = (UINT32)(Regs[0] & 0xFF);
+  __cpuidex(Regs, 0x80000000, 0);
+  MaxLeaf = (UINT32)Regs[0];
+  PhysBits = 52;
+  if (MaxLeaf >= 0x80000008U) {
+    __cpuidex(Regs, 0x80000008, 0);
+    PhysBits = (UINT32)(Regs[0] & 0xFF);
+  }
   if (PhysBits == 0 || PhysBits > 52) {
     PhysBits = 52;
   }
   gPhysMask = ((1ULL << PhysBits) - 1ULL) & PAGE_MASK;
-  __cpuidex(Regs, 0x8000001F, 0);
-  if ((Regs[0] & 1) != 0) {
-    CBit = (UINT32)(Regs[1] & 0x3F);
-    if (CBit < 63) {
-      gPhysMask &= ~(1ULL << CBit);
+  if (MaxLeaf >= 0x8000001FU) {
+    __cpuidex(Regs, 0x8000001F, 0);
+    if ((Regs[0] & 1) != 0) {
+      CBit = (UINT32)(Regs[1] & 0x3F);
+      if (CBit < 63) {
+        gPhysMask &= ~(1ULL << CBit);
+      }
     }
   }
+  RuntimeRecord(DBG_RT_INIT_KERNEL, EFI_SUCCESS, 0x80000008ULL, PhysBits,
+                gPhysMask);
   return gPhysMask;
 }
 
@@ -234,13 +356,19 @@ static EFI_STATUS TranslateCr3(UINT64 Cr3, UINT64 Va, UINT64 *Pa) {
   UINT64 Entry;
   UINT64 Base = Cr3 & PhysMask();
 
+  if (gRuntimeTraceActive != 0 && gTranslateTraceCount < 64) {
+    RuntimeRecord(DBG_RT_TRANSLATE, EFI_SUCCESS, Cr3, Va, Base);
+    gTranslateTraceCount++;
+  }
   if (ReadPhys64(Base + (((Va >> 39) & 0x1FF) * 8), &Entry) != EFI_SUCCESS ||
       (Entry & PTE_PRESENT) == 0) {
+    RuntimeRecord(DBG_RT_TRANSLATE, EFI_NOT_FOUND, 1, Va, Base);
     return EFI_NOT_FOUND;
   }
   Base = PteAddress(Entry);
   if (ReadPhys64(Base + (((Va >> 30) & 0x1FF) * 8), &Entry) != EFI_SUCCESS ||
       (Entry & PTE_PRESENT) == 0) {
+    RuntimeRecord(DBG_RT_TRANSLATE, EFI_NOT_FOUND, 2, Va, Base);
     return EFI_NOT_FOUND;
   }
   if ((Entry & PTE_LARGE) != 0) {
@@ -251,6 +379,7 @@ static EFI_STATUS TranslateCr3(UINT64 Cr3, UINT64 Va, UINT64 *Pa) {
   Base = PteAddress(Entry);
   if (ReadPhys64(Base + (((Va >> 21) & 0x1FF) * 8), &Entry) != EFI_SUCCESS ||
       (Entry & PTE_PRESENT) == 0) {
+    RuntimeRecord(DBG_RT_TRANSLATE, EFI_NOT_FOUND, 3, Va, Base);
     return EFI_NOT_FOUND;
   }
   if ((Entry & PTE_LARGE) != 0) {
@@ -261,6 +390,7 @@ static EFI_STATUS TranslateCr3(UINT64 Cr3, UINT64 Va, UINT64 *Pa) {
   Base = PteAddress(Entry);
   if (ReadPhys64(Base + (((Va >> 12) & 0x1FF) * 8), &Entry) != EFI_SUCCESS ||
       (Entry & PTE_PRESENT) == 0) {
+    RuntimeRecord(DBG_RT_TRANSLATE, EFI_NOT_FOUND, 4, Va, Base);
     return EFI_NOT_FOUND;
   }
   *Pa = PteAddress(Entry) + (Va & 0xFFFULL);
@@ -456,7 +586,10 @@ static BOOLEAN LooksLikeProcessList(UINT64 Eprocess, UINT32 PidOffset) {
 static EFI_STATUS ResolveListLayout(VOID) {
   UINT32 PidOffset;
 
+  RuntimeRecord(DBG_RT_RESOLVE_LIST, EFI_SUCCESS, gSystemProcess, gKernelCr3,
+                0);
   if (!IsKernelPtr(gSystemProcess)) {
+    RuntimeRecord(DBG_RT_RESOLVE_LIST, EFI_NOT_FOUND, gSystemProcess, 0, 1);
     return EFI_NOT_FOUND;
   }
   for (PidOffset = 0x20; PidOffset < 0x900; PidOffset += 8) {
@@ -467,9 +600,12 @@ static EFI_STATUS ResolveListLayout(VOID) {
         LooksLikeProcessList(gSystemProcess, PidOffset)) {
       gPidOffset = PidOffset;
       gLinksOffset = PidOffset + 8;
+      RuntimeRecord(DBG_RT_RESOLVE_LIST, EFI_SUCCESS, gPidOffset,
+                    gLinksOffset, Pid);
       return EFI_SUCCESS;
     }
   }
+  RuntimeRecord(DBG_RT_RESOLVE_LIST, EFI_NOT_FOUND, 0x20, 0x900, 2);
   return EFI_NOT_FOUND;
 }
 
@@ -479,6 +615,8 @@ static EFI_STATUS ResolveNameOffset(VOID) {
   if (gNameOffset != 0) {
     return EFI_SUCCESS;
   }
+  RuntimeRecord(DBG_RT_RESOLVE_NAME, EFI_SUCCESS, gSystemProcess, gKernelCr3,
+                0);
   for (Offset = 0x100; Offset < 0x900; Offset++) {
     char Name[NAME_SIZE];
     ZeroMem(Name, sizeof(Name));
@@ -486,9 +624,12 @@ static EFI_STATUS ResolveNameOffset(VOID) {
                     sizeof(Name) - 1, 0) == EFI_SUCCESS &&
         SameName(Name, "System")) {
       gNameOffset = Offset;
+      RuntimeRecord(DBG_RT_RESOLVE_NAME, EFI_SUCCESS, gNameOffset,
+                    NameTag(Name), 0);
       return EFI_SUCCESS;
     }
   }
+  RuntimeRecord(DBG_RT_RESOLVE_NAME, EFI_NOT_FOUND, 0x100, 0x900, 0);
   return EFI_NOT_FOUND;
 }
 
@@ -498,6 +639,8 @@ static EFI_STATUS ResolveCr3Offset(VOID) {
   if (gCr3Offset != 0) {
     return EFI_SUCCESS;
   }
+  RuntimeRecord(DBG_RT_RESOLVE_CR3, EFI_SUCCESS, gSystemProcess, gKernelBase,
+                gKernelCr3);
   for (Offset = 0x20; Offset < 0x100; Offset += 8) {
     UINT64 Cr3;
     UINT16 Mz;
@@ -508,9 +651,11 @@ static EFI_STATUS ResolveCr3Offset(VOID) {
     Cr3 &= PAGE_MASK;
     if (ReadVirt16(Cr3, gKernelBase, &Mz) == EFI_SUCCESS && Mz == 0x5A4D) {
       gCr3Offset = Offset;
+      RuntimeRecord(DBG_RT_RESOLVE_CR3, EFI_SUCCESS, gCr3Offset, Cr3, Mz);
       return EFI_SUCCESS;
     }
   }
+  RuntimeRecord(DBG_RT_RESOLVE_CR3, EFI_NOT_FOUND, 0x20, 0x100, 0);
   return EFI_NOT_FOUND;
 }
 
@@ -519,26 +664,41 @@ static EFI_STATUS TryKernelCr3(UINT64 Cr3, UINT64 Lstar) {
   UINT64 Limit;
   UINT64 Base;
   UINT64 Export;
+  EFI_STATUS Status;
 
   gKernelCr3 = Cr3 & PAGE_MASK;
   Start = Lstar & LARGE_PAGE_MASK;
   Limit = Start > 0x10000000ULL ? Start - 0x10000000ULL : 0;
+  RuntimeRecord(DBG_RT_TRY_CR3, EFI_SUCCESS, gKernelCr3, Lstar, Start);
+  RuntimeRecord(DBG_RT_KERNEL_SCAN, EFI_SUCCESS, Start, Limit, gKernelCr3);
   for (Base = Start; Base > Limit; Base -= LARGE_PAGE_SIZE) {
     UINT16 Mz;
+    if (gKernelScanTraceCount < 64) {
+      RuntimeRecord(DBG_RT_KERNEL_SCAN, EFI_SUCCESS, Base,
+                    gKernelScanTraceCount, 0);
+      gKernelScanTraceCount++;
+    }
     if (ReadVirt16(gKernelCr3, Base, &Mz) != EFI_SUCCESS || Mz != 0x5A4D) {
       continue;
     }
-    if (ResolveExport(gKernelCr3, Base, "PsInitialSystemProcess",
-                      &Export) == EFI_SUCCESS) {
+    RuntimeRecord(DBG_RT_KERNEL_SCAN, EFI_SUCCESS, Base, Mz, 0x5A4D);
+    Status = ResolveExport(gKernelCr3, Base, "PsInitialSystemProcess",
+                           &Export);
+    RuntimeRecord(DBG_RT_KERNEL_SCAN, Status, Base, Export, 1);
+    if (Status == EFI_SUCCESS) {
       gKernelBase = Base;
       if (ReadVirt64(gKernelCr3, Export, &gSystemProcess) != EFI_SUCCESS) {
+        RuntimeRecord(DBG_RT_KERNEL_SCAN, EFI_NOT_FOUND, Base, Export, 2);
         return EFI_NOT_FOUND;
       }
       ResolveExport(gKernelCr3, Base, "PsLoadedModuleList",
                     &gPsLoadedModuleList);
+      RuntimeRecord(DBG_RT_KERNEL_SCAN, EFI_SUCCESS, gKernelBase,
+                    gSystemProcess, gPsLoadedModuleList);
       return EFI_SUCCESS;
     }
   }
+  RuntimeRecord(DBG_RT_KERNEL_SCAN, EFI_NOT_FOUND, Start, Limit, gKernelCr3);
   return EFI_NOT_FOUND;
 }
 
@@ -546,36 +706,66 @@ static EFI_STATUS InitKernel(VOID) {
   UINT64 Lstar;
   UINT64 Cr3;
   UINTN Cpu;
+  EFI_STATUS Status;
 
+  RuntimeRecord(DBG_RT_INIT_KERNEL, EFI_SUCCESS, gKernelBase, gSystemProcess,
+                gKernelCr3);
   if (gKernelBase != 0 && gSystemProcess != 0) {
+    RuntimeRecord(DBG_RT_INIT_KERNEL, EFI_SUCCESS, gKernelBase,
+                  gSystemProcess, 1);
     return EFI_SUCCESS;
   }
   Lstar = __readmsr(MSR_LSTAR);
+  RuntimeRecord(DBG_RT_INIT_KERNEL, EFI_SUCCESS, Lstar, gSmst->NumberOfCpus,
+                2);
   for (Cpu = 0; Cpu < gSmst->NumberOfCpus; Cpu++) {
-    if (ReadSavedCr3(Cpu, &Cr3) == EFI_SUCCESS && Cr3 < 0x100000000ULL &&
-        TryKernelCr3(Cr3, Lstar) == EFI_SUCCESS) {
-      return EFI_SUCCESS;
+    Cr3 = 0;
+    Status = ReadSavedCr3(Cpu, &Cr3);
+    RuntimeRecord(DBG_RT_SAVED_CR3, Status, Cpu, Cr3, 1);
+    if (Status == EFI_SUCCESS && Cr3 < 0x100000000ULL) {
+      Status = TryKernelCr3(Cr3, Lstar);
+      RuntimeRecord(DBG_RT_TRY_CR3, Status, Cr3, Cpu, 1);
+      if (Status == EFI_SUCCESS) {
+        return EFI_SUCCESS;
+      }
     }
   }
   for (Cpu = 0; Cpu < gSmst->NumberOfCpus; Cpu++) {
-    if (ReadSavedCr3(Cpu, &Cr3) == EFI_SUCCESS &&
-        TryKernelCr3(Cr3, Lstar) == EFI_SUCCESS) {
-      return EFI_SUCCESS;
+    Cr3 = 0;
+    Status = ReadSavedCr3(Cpu, &Cr3);
+    RuntimeRecord(DBG_RT_SAVED_CR3, Status, Cpu, Cr3, 2);
+    if (Status == EFI_SUCCESS) {
+      Status = TryKernelCr3(Cr3, Lstar);
+      RuntimeRecord(DBG_RT_TRY_CR3, Status, Cr3, Cpu, 2);
+      if (Status == EFI_SUCCESS) {
+        return EFI_SUCCESS;
+      }
     }
   }
   Cr3 = __readcr3() & PAGE_MASK;
-  return TryKernelCr3(Cr3, Lstar);
+  RuntimeRecord(DBG_RT_SAVED_CR3, EFI_SUCCESS, 0xFFFFFFFFULL, Cr3, 3);
+  Status = TryKernelCr3(Cr3, Lstar);
+  RuntimeRecord(DBG_RT_TRY_CR3, Status, Cr3, 0xFFFFFFFFULL, 3);
+  return Status;
 }
 
 static EFI_STATUS ResolveProcessLayout(VOID) {
+  RuntimeRecord(DBG_RT_RESOLVE_LAYOUT, EFI_SUCCESS, gPidOffset, gLinksOffset,
+                gCr3Offset);
   if (gPidOffset != 0 && gLinksOffset != 0 && gCr3Offset != 0) {
+    RuntimeRecord(DBG_RT_RESOLVE_LAYOUT, EFI_SUCCESS, gPidOffset,
+                  gLinksOffset, 1);
     return EFI_SUCCESS;
   }
   if (InitKernel() != EFI_SUCCESS || ResolveListLayout() != EFI_SUCCESS ||
       ResolveCr3Offset() != EFI_SUCCESS) {
+    RuntimeRecord(DBG_RT_RESOLVE_LAYOUT, EFI_NOT_FOUND, gKernelBase,
+                  gSystemProcess, gKernelCr3);
     return EFI_NOT_FOUND;
   }
   ResolveNameOffset();
+  RuntimeRecord(DBG_RT_RESOLVE_LAYOUT, EFI_SUCCESS, gPidOffset, gLinksOffset,
+                gCr3Offset);
   return EFI_SUCCESS;
 }
 
@@ -658,8 +848,11 @@ static EFI_STATUS FillProcessInfo(UINT64 Eprocess, PROCESS_INFO *Info) {
   UINT64 Pid;
   UINT64 Cr3;
   ZeroMem(Info, sizeof(*Info));
+  RuntimeRecord(DBG_RT_FILL_PROCESS, EFI_SUCCESS, Eprocess, gPidOffset,
+                gCr3Offset);
   if (ReadVirt64(gKernelCr3, Eprocess + gPidOffset, &Pid) != EFI_SUCCESS ||
       GetProcessCr3(Eprocess, &Cr3) != EFI_SUCCESS) {
+    RuntimeRecord(DBG_RT_FILL_PROCESS, EFI_NOT_FOUND, Eprocess, 0, 1);
     return EFI_NOT_FOUND;
   }
   Info->Pid = (UINT32)Pid;
@@ -671,6 +864,10 @@ static EFI_STATUS FillProcessInfo(UINT64 Eprocess, PROCESS_INFO *Info) {
     Info->Name[sizeof(Info->Name) - 1] = 0;
   }
   FindImageBase(Eprocess, Cr3, &Info->ImageBase);
+  RuntimeRecord(DBG_RT_FILL_PROCESS, EFI_SUCCESS, Info->Pid, Info->Eprocess,
+                Info->Cr3);
+  RuntimeRecord(DBG_RT_FILL_PROCESS, EFI_SUCCESS, Info->ImageBase,
+                NameTag(Info->Name), 2);
   return EFI_SUCCESS;
 }
 
@@ -679,7 +876,9 @@ static EFI_STATUS FindProcessPid(UINT32 Pid, PROCESS_INFO *Info) {
   UINT64 Link;
   UINT32 Guard;
 
+  RuntimeRecord(DBG_RT_FIND_PROCESS_PID, EFI_SUCCESS, Pid, 0, 0);
   if (ResolveProcessLayout() != EFI_SUCCESS) {
+    RuntimeRecord(DBG_RT_FIND_PROCESS_PID, EFI_NOT_FOUND, Pid, 0, 1);
     return EFI_NOT_FOUND;
   }
   if (Pid == 4) {
@@ -697,6 +896,8 @@ static EFI_STATUS FindProcessPid(UINT32 Pid, PROCESS_INFO *Info) {
       break;
     }
     if ((UINT32)CurrentPid == Pid) {
+      RuntimeRecord(DBG_RT_FIND_PROCESS_PID, EFI_SUCCESS, Pid, Eprocess,
+                    Guard);
       return FillProcessInfo(Eprocess, Info);
     }
     if (ReadVirt64(gKernelCr3, Eprocess + gLinksOffset, &Link) !=
@@ -704,6 +905,7 @@ static EFI_STATUS FindProcessPid(UINT32 Pid, PROCESS_INFO *Info) {
       break;
     }
   }
+  RuntimeRecord(DBG_RT_FIND_PROCESS_PID, EFI_NOT_FOUND, Pid, Guard, Link);
   return EFI_NOT_FOUND;
 }
 
@@ -713,13 +915,18 @@ static EFI_STATUS FindProcessName(const char *Name, PROCESS_INFO *Info) {
   UINT32 Guard;
   char CurrentName[NAME_SIZE];
 
+  RuntimeRecord(DBG_RT_FIND_PROCESS_NAME, EFI_SUCCESS, NameTag(Name), 0, 0);
   if (ResolveProcessLayout() != EFI_SUCCESS || gNameOffset == 0) {
+    RuntimeRecord(DBG_RT_FIND_PROCESS_NAME, EFI_NOT_FOUND, NameTag(Name),
+                  gNameOffset, 1);
     return EFI_NOT_FOUND;
   }
   ZeroMem(CurrentName, sizeof(CurrentName));
   CopyVirtCr3(gKernelCr3, gSystemProcess + gNameOffset, CurrentName,
               sizeof(CurrentName) - 1, 0);
   if (SameName(CurrentName, Name)) {
+    RuntimeRecord(DBG_RT_FIND_PROCESS_NAME, EFI_SUCCESS, NameTag(Name),
+                  gSystemProcess, 0);
     return FillProcessInfo(gSystemProcess, Info);
   }
   Head = gSystemProcess + gLinksOffset;
@@ -732,6 +939,8 @@ static EFI_STATUS FindProcessName(const char *Name, PROCESS_INFO *Info) {
     CopyVirtCr3(gKernelCr3, Eprocess + gNameOffset, CurrentName,
                 sizeof(CurrentName) - 1, 0);
     if (SameName(CurrentName, Name)) {
+      RuntimeRecord(DBG_RT_FIND_PROCESS_NAME, EFI_SUCCESS, NameTag(Name),
+                    Eprocess, Guard);
       return FillProcessInfo(Eprocess, Info);
     }
     if (ReadVirt64(gKernelCr3, Eprocess + gLinksOffset, &Link) !=
@@ -739,6 +948,8 @@ static EFI_STATUS FindProcessName(const char *Name, PROCESS_INFO *Info) {
       break;
     }
   }
+  RuntimeRecord(DBG_RT_FIND_PROCESS_NAME, EFI_NOT_FOUND, NameTag(Name), Guard,
+                Link);
   return EFI_NOT_FOUND;
 }
 
@@ -857,20 +1068,36 @@ static EFI_STATUS HandleRequest(REQUEST *Request, RESPONSE *Response) {
   if (Request->Magic != REQ_MAGIC) {
     return EFI_NOT_FOUND;
   }
+  gRuntimeTraceInit = 0;
+  gRuntimeTraceActive = 1;
+  gCopyPhysTraceCount = 0;
+  gTranslateTraceCount = 0;
+  gKernelScanTraceCount = 0;
+  RuntimeRecord(DBG_RT_REQUEST, EFI_SUCCESS, Request->Command,
+                Request->Sequence, Request->DataSize);
   Size = (UINT32)Request->Arg3;
   if (Request->Command == CMD_PING) {
     Reply(Response, Request, EFI_SUCCESS, 0x504F4E47ULL, 0, 0);
+    RuntimeRecord(DBG_RT_REQUEST_DONE, EFI_SUCCESS, Request->Command,
+                  Response->Magic, Response->Status);
+    gRuntimeTraceActive = 0;
     return EFI_SUCCESS;
   }
   if (Request->Command == CMD_READ_PHYS) {
     Size = (UINT32)Request->Arg2;
     if (Size > RESPONSE_DATA_SIZE) {
       Reply(Response, Request, EFI_INVALID_PARAMETER, 0, 0, 0);
+      RuntimeRecord(DBG_RT_REQUEST_DONE, EFI_INVALID_PARAMETER,
+                    Request->Command, Size, RESPONSE_DATA_SIZE);
+      gRuntimeTraceActive = 0;
       return EFI_INVALID_PARAMETER;
     }
     Status = CopyPhys(Request->Arg1, Scratch, Size, 0);
     Reply(Response, Request, Status, Request->Arg1, Scratch,
           EFI_ERROR(Status) ? 0 : Size);
+    RuntimeRecord(DBG_RT_REQUEST_DONE, Status, Request->Command,
+                  Request->Arg1, Size);
+    gRuntimeTraceActive = 0;
     return Status;
   }
   if (Request->Command == CMD_WRITE_PHYS) {
@@ -878,18 +1105,27 @@ static EFI_STATUS HandleRequest(REQUEST *Request, RESPONSE *Response) {
                  ? CopyPhys(Request->Arg1, Request->Data, Request->DataSize, 1)
                  : EFI_INVALID_PARAMETER;
     Reply(Response, Request, Status, Request->Arg1, 0, 0);
+    RuntimeRecord(DBG_RT_REQUEST_DONE, Status, Request->Command,
+                  Request->Arg1, Request->DataSize);
+    gRuntimeTraceActive = 0;
     return Status;
   }
   if (Request->Command == CMD_FIND_PROCESS_PID) {
     Status = FindProcessPid((UINT32)Request->Arg1, &Process);
     Reply(Response, Request, Status, Process.Eprocess, &Process,
           EFI_ERROR(Status) ? 0 : sizeof(Process));
+    RuntimeRecord(DBG_RT_REQUEST_DONE, Status, Request->Command,
+                  Process.Eprocess, Process.Pid);
+    gRuntimeTraceActive = 0;
     return Status;
   }
   if (Request->Command == CMD_FIND_PROCESS_NAME) {
     Status = FindProcessName((char *)Request->Data, &Process);
     Reply(Response, Request, Status, Process.Eprocess, &Process,
           EFI_ERROR(Status) ? 0 : sizeof(Process));
+    RuntimeRecord(DBG_RT_REQUEST_DONE, Status, Request->Command,
+                  Process.Eprocess, Process.Pid);
+    gRuntimeTraceActive = 0;
     return Status;
   }
   if (Request->Command == CMD_TRANSLATE_VIRT) {
@@ -898,11 +1134,17 @@ static EFI_STATUS HandleRequest(REQUEST *Request, RESPONSE *Response) {
       Status = TranslateCr3(Process.Cr3, Request->Arg2, &Pa);
     }
     Reply(Response, Request, Status, EFI_ERROR(Status) ? 0 : Pa, 0, 0);
+    RuntimeRecord(DBG_RT_REQUEST_DONE, Status, Request->Command, Pa,
+                  Request->Arg2);
+    gRuntimeTraceActive = 0;
     return Status;
   }
   if (Request->Command == CMD_READ_VIRT) {
     if (Size > RESPONSE_DATA_SIZE) {
       Reply(Response, Request, EFI_INVALID_PARAMETER, 0, 0, 0);
+      RuntimeRecord(DBG_RT_REQUEST_DONE, EFI_INVALID_PARAMETER,
+                    Request->Command, Size, RESPONSE_DATA_SIZE);
+      gRuntimeTraceActive = 0;
       return EFI_INVALID_PARAMETER;
     }
     Status = FindProcessPid((UINT32)Request->Arg1, &Process);
@@ -911,11 +1153,17 @@ static EFI_STATUS HandleRequest(REQUEST *Request, RESPONSE *Response) {
     }
     Reply(Response, Request, Status, Request->Arg2, Scratch,
           EFI_ERROR(Status) ? 0 : Size);
+    RuntimeRecord(DBG_RT_REQUEST_DONE, Status, Request->Command,
+                  Request->Arg2, Size);
+    gRuntimeTraceActive = 0;
     return Status;
   }
   if (Request->Command == CMD_WRITE_VIRT) {
     if (Request->DataSize > RESPONSE_DATA_SIZE) {
       Reply(Response, Request, EFI_INVALID_PARAMETER, 0, 0, 0);
+      RuntimeRecord(DBG_RT_REQUEST_DONE, EFI_INVALID_PARAMETER,
+                    Request->Command, Request->DataSize, RESPONSE_DATA_SIZE);
+      gRuntimeTraceActive = 0;
       return EFI_INVALID_PARAMETER;
     }
     Status = FindProcessPid((UINT32)Request->Arg1, &Process);
@@ -924,6 +1172,9 @@ static EFI_STATUS HandleRequest(REQUEST *Request, RESPONSE *Response) {
                            Request->DataSize, 1);
     }
     Reply(Response, Request, Status, Request->Arg2, 0, 0);
+    RuntimeRecord(DBG_RT_REQUEST_DONE, Status, Request->Command,
+                  Request->Arg2, Request->DataSize);
+    gRuntimeTraceActive = 0;
     return Status;
   }
   if (Request->Command == CMD_FIND_MODULE) {
@@ -931,17 +1182,26 @@ static EFI_STATUS HandleRequest(REQUEST *Request, RESPONSE *Response) {
                             &Module);
     Reply(Response, Request, Status, Module.Base, &Module,
           EFI_ERROR(Status) ? 0 : sizeof(Module));
+    RuntimeRecord(DBG_RT_REQUEST_DONE, Status, Request->Command, Module.Base,
+                  Module.Size);
+    gRuntimeTraceActive = 0;
     return Status;
   }
   if (Request->Command == CMD_FIND_KERNEL_MODULE) {
     Status = FindKernelModule((char *)Request->Data, &Module);
     Reply(Response, Request, Status, Module.Base, &Module,
           EFI_ERROR(Status) ? 0 : sizeof(Module));
+    RuntimeRecord(DBG_RT_REQUEST_DONE, Status, Request->Command, Module.Base,
+                  Module.Size);
+    gRuntimeTraceActive = 0;
     return Status;
   }
   if (Request->Command == CMD_FIND_EXPORT) {
     if (Request->DataSize <= sizeof(MODULE_INFO)) {
       Reply(Response, Request, EFI_INVALID_PARAMETER, 0, 0, 0);
+      RuntimeRecord(DBG_RT_REQUEST_DONE, EFI_INVALID_PARAMETER,
+                    Request->Command, Request->DataSize, sizeof(MODULE_INFO));
+      gRuntimeTraceActive = 0;
       return EFI_INVALID_PARAMETER;
     }
     CopyMemLocal(&Module, Request->Data, sizeof(Module));
@@ -951,9 +1211,13 @@ static EFI_STATUS HandleRequest(REQUEST *Request, RESPONSE *Response) {
                            (char *)(Request->Data + sizeof(Module)),
                            &Address);
     Reply(Response, Request, Status, Address, 0, 0);
+    RuntimeRecord(DBG_RT_REQUEST_DONE, Status, Request->Command, Address, 0);
+    gRuntimeTraceActive = 0;
     return Status;
   }
   Reply(Response, Request, EFI_UNSUPPORTED, 0, 0, 0);
+  RuntimeRecord(DBG_RT_REQUEST_DONE, EFI_UNSUPPORTED, Request->Command, 0, 0);
+  gRuntimeTraceActive = 0;
   return EFI_UNSUPPORTED;
 }
 
@@ -1008,6 +1272,7 @@ static EFI_STATUS RegisterSwSmi(VOID) {
   SwContext.SwSmiInputValue = gSwSmiValue;
   Status = SwDispatch->Register(SwDispatch, SwSmiHandler, &SwContext,
                                 &gSwHandle);
+  DebugSmm(DBG_SMM_SW_REGISTERED, Status);
   if (EFI_ERROR(Status)) {
     LogStatus("smm sw smi register failed ", Status);
   } else {
@@ -1060,8 +1325,10 @@ static EFI_STATUS InitSmm(VOID) {
   }
   Status = ValidateSmst();
   if (EFI_ERROR(Status)) {
+    DebugSmm(DBG_SMM_SMST_OK, Status);
     return Status;
   }
+  DebugSmm(DBG_SMM_SMST_OK, EFI_SUCCESS);
   Log("smm smst ok cpus=0x");
   LogHex(gSmst->NumberOfCpus);
   Log("\n");
@@ -1086,6 +1353,7 @@ static EFI_STATUS ApplyConfig(CONFIG *Config, const char *Source) {
       LogHex(Config->MailboxSize);
     }
     Log("\n");
+    DebugSmm(DBG_SMM_CONFIG_APPLIED, EFI_INVALID_PARAMETER);
     return EFI_INVALID_PARAMETER;
   }
   gMailboxPhysical = Config->MailboxPhysical;
@@ -1102,6 +1370,7 @@ static EFI_STATUS ApplyConfig(CONFIG *Config, const char *Source) {
   Log(" sw=0x");
   LogHex(gSwSmiValue);
   Log("\n");
+  DebugSmm(DBG_SMM_CONFIG_APPLIED, EFI_SUCCESS);
   Status = RegisterSwSmi();
   return Status;
 }
@@ -1130,6 +1399,7 @@ static EFI_STATUS RegisterConfigComm(VOID) {
   }
   Status = gSmst->SmiHandlerRegister(ConfigCommHandler, &gConfigCommGuid,
                                       &gCommHandle);
+  DebugSmm(DBG_SMM_COMM_REGISTERED, Status);
   if (EFI_ERROR(Status)) {
     LogStatus("smm config comm register failed ", Status);
   } else {
@@ -1167,6 +1437,7 @@ EFI_STATUS EFIAPI SmmEntry(EFI_HANDLE ImageHandle,
 
   gSystemTable = SystemTable;
   SerialInit();
+  DebugSmm(DBG_SMM_ENTRY, EFI_SUCCESS);
   Log("mem smm init\n");
   Status = InitSmm();
   if (!EFI_ERROR(Status)) {
@@ -1179,6 +1450,7 @@ EFI_STATUS EFIAPI SmmEntry(EFI_HANDLE ImageHandle,
   } else {
     LogStatus("smm init failed ", Status);
   }
+  DebugSmm(DBG_SMM_DONE, Status);
   Log("mem smm done\n");
   return EFI_SUCCESS;
 }

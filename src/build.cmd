@@ -1,7 +1,8 @@
 @echo off
 setlocal
 
-cd /d "%~dp0.."
+cd /d "%~dp0"
+set "SRC=%~dp0"
 
 where cl >nul 2>nul
 if errorlevel 1 (
@@ -9,23 +10,25 @@ if errorlevel 1 (
     exit /b 1
 )
 
-set "OUT=Work\build"
+set "OUT=Work\build_debug02"
 mkdir "%OUT%" 2>nul
 del /q "%OUT%\*.obj" "%OUT%\*.efi" "%OUT%\*.exe" 2>nul
 
 set "EFI_CL=/nologo /c /O1 /Oi /GS- /GR- /EHs-c- /Zl /W4"
 set "EFI_LD=/nologo /dll /nodefaultlib /machine:x64 /fixed:no /dynamicbase:no /nxcompat:no"
 
-call cl %EFI_CL% /Fo:%OUT%\Smm.obj src\Smm.c || exit /b 1
-call cl %EFI_CL% /Fo:%OUT%\Dxe.obj src\Dxe.c || exit /b 1
+call cl %EFI_CL% /Fo:%OUT%\Smm.obj "%SRC%Smm.c" || exit /b 1
+call cl %EFI_CL% /Fo:%OUT%\Dxe.obj "%SRC%Dxe.c" || exit /b 1
 
 link %EFI_LD% /subsystem:EFI_BOOT_SERVICE_DRIVER /entry:SmmEntry /out:%OUT%\Smm.efi %OUT%\Smm.obj || exit /b 1
 link %EFI_LD% /subsystem:EFI_BOOT_SERVICE_DRIVER /entry:DxeEntry /out:%OUT%\Dxe.efi %OUT%\Dxe.obj || exit /b 1
 
-call cl /nologo /W4 /O2 /DUNICODE /D_UNICODE /Fo:%OUT%\Client.obj /Fe:%OUT%\Client.exe src\Client.c || exit /b 1
+call cl /nologo /W4 /O2 /DUNICODE /D_UNICODE /Fo:%OUT%\Client.obj /Fe:%OUT%\Client.exe "%SRC%Client.c" || exit /b 1
+call cl /nologo /W4 /O2 /Fo:%OUT%\DbgRead.obj /Fe:%OUT%\DbgRead.exe "%SRC%DbgRead.c" advapi32.lib || exit /b 1
 REM API example build: call cl /nologo /W4 /O2 /DUNICODE /D_UNICODE /DAPI_ONLY /Fo:%OUT%\ /Fe:%OUT%\example.exe src\example.c src\Client.c || exit /b 1
 
 echo Built:
 echo   %OUT%\Smm.efi
 echo   %OUT%\Dxe.efi
 echo   %OUT%\Client.exe
+echo   %OUT%\DbgRead.exe
