@@ -141,7 +141,12 @@ static VOID DebugSmm(UINT32 Stage, EFI_STATUS Status) {
   SaveSmmDebug();
 }
 
+#ifndef ENABLE_RUNTIME_TRACE
+#define ENABLE_RUNTIME_TRACE 0
+#endif
+
 static VOID InitRuntimeTrace(VOID) {
+#if ENABLE_RUNTIME_TRACE
   static const char Build[] = __DATE__ " " __TIME__;
   UINTN Size = sizeof(Build);
 
@@ -156,10 +161,12 @@ static VOID InitRuntimeTrace(VOID) {
   CopyMemLocal(gRuntimeTrace.Build, Build, Size);
   gRuntimeTraceInit = 1;
   SetDebugVariable(gRuntimeTraceName, &gRuntimeTrace, sizeof(gRuntimeTrace));
+#endif
 }
 
 static VOID RuntimeRecord(UINT32 Stage, EFI_STATUS Status, UINT64 Data0,
                           UINT64 Data1, UINT64 Data2) {
+#if ENABLE_RUNTIME_TRACE
   UINT32 Index;
 
   InitRuntimeTrace();
@@ -178,13 +185,17 @@ static VOID RuntimeRecord(UINT32 Stage, EFI_STATUS Status, UINT64 Data0,
   gRuntimeTrace.Records[Index].Data0 = Data0;
   gRuntimeTrace.Records[Index].Data1 = Data1;
   gRuntimeTrace.Records[Index].Data2 = Data2;
+#endif
 }
 
 static VOID RuntimeFlush(VOID) {
+#if ENABLE_RUNTIME_TRACE
   InitRuntimeTrace();
   gRuntimeTrace.State = gSmmDebugState;
   SetDebugVariable(gRuntimeTraceName, &gRuntimeTrace, sizeof(gRuntimeTrace));
+#endif
 }
+
 
 VOID *memset(VOID *Destination, int Value, size_t Size) {
   UINT8 *Dst = (UINT8 *)Destination;
@@ -1151,10 +1162,14 @@ static EFI_STATUS FillProcessInfo(UINT64 Eprocess, PROCESS_INFO *Info) {
   return EFI_SUCCESS;
 }
 
+static UINT32 gCachedPid = 0xFFFFFFFF;
+static UINT64 gCachedEprocess = 0;
+
 static EFI_STATUS FindProcessPid(UINT32 Pid, PROCESS_INFO *Info) {
   UINT64 Head;
   UINT64 Link;
   UINT32 Guard;
+  UINT64 CurrentPid;
 
   RuntimeRecord(DBG_RT_FIND_PROCESS_PID, EFI_SUCCESS, Pid, 0, 0);
   if (ResolveProcessLayout() != EFI_SUCCESS) {
@@ -1164,18 +1179,29 @@ static EFI_STATUS FindProcessPid(UINT32 Pid, PROCESS_INFO *Info) {
   if (Pid == 4) {
     return FillProcessInfo(gSystemProcess, Info);
   }
+  
+  if (Pid == gCachedPid && gCachedEprocess != 0) {
+    if (ReadVirt64(gKernelCr3, gCachedEprocess + gPidOffset, &CurrentPid) == EFI_SUCCESS &&
+        (UINT32)CurrentPid == Pid) {
+      return FillProcessInfo(gCachedEprocess, Info);
+    }
+    gCachedPid = 0xFFFFFFFF;
+    gCachedEprocess = 0;
+  }
+
   Head = gSystemProcess + gLinksOffset;
   if (ReadVirt64(gKernelCr3, Head, &Link) != EFI_SUCCESS) {
     return EFI_NOT_FOUND;
   }
   for (Guard = 0; Guard < 4096 && IsKernelPtr(Link) && Link != Head; Guard++) {
     UINT64 Eprocess = Link - gLinksOffset;
-    UINT64 CurrentPid;
     if (ReadVirt64(gKernelCr3, Eprocess + gPidOffset, &CurrentPid) !=
         EFI_SUCCESS) {
       break;
     }
     if ((UINT32)CurrentPid == Pid) {
+      gCachedPid = Pid;
+      gCachedEprocess = Eprocess;
       RuntimeRecord(DBG_RT_FIND_PROCESS_PID, EFI_SUCCESS, Pid, Eprocess,
                     Guard);
       return FillProcessInfo(Eprocess, Info);
