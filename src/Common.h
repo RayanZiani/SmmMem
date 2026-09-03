@@ -1,3 +1,26 @@
+/**
+ * MIT License
+ * 
+ * Copyright (c) 2026 Rayan Ziani
+ * 
+ * Permission is hereby granted, free of charge, to any person obtaining a copy
+ * of this software and associated documentation files (the "Software"), to deal
+ * in the Software without restriction, including without limitation the rights
+ * to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+ * copies of the Software, and to permit persons to whom the Software is
+ * furnished to do so, subject to the following conditions:
+ * 
+ * The above copyright notice and this permission notice shall be included in all
+ * copies or substantial portions of the Software.
+ * 
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+ * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+ * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+ * SOFTWARE.
+ */
 #ifndef COMMON_H
 #define COMMON_H
 
@@ -29,8 +52,8 @@ typedef UINT64 EFI_PHYSICAL_ADDRESS;
 #define MAILBOX_SIZE 0x2000U
 #define REQUEST_SIZE 4096U
 #define RESPONSE_OFFSET 0x1000U
-#define RESPONSE_SIZE 512U
-#define RESPONSE_DATA_SIZE 352U
+#define RESPONSE_SIZE 4096U
+#define RESPONSE_DATA_SIZE 4048U
 #define NAME_SIZE 64U
 
 #define CONFIG_MAGIC 0x434D4D534D4D5355ULL
@@ -499,3 +522,4 @@ static EFI_GUID gEfiAcpiTableProtocolGuid = {
     {0x7b, 0xb2, 0x5a, 0x9c, 0x7e, 0xc5, 0x27, 0x5c}};
 
 #endif
+

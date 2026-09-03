@@ -410,10 +410,10 @@ Mapper-specific failure points:
 
 - The project is designed around firmware-based access, not a Windows kernel driver.
 - The SMM handler is event-driven; it only runs when an SMI is triggered.
-- `Client.c` chunks read and write operations to match the fixed response payload size (352 bytes per round-trip for `src/`, 4000 bytes for `mapper/`).
+- `Client.c` chunks read and write operations to match the fixed response payload size (4048 bytes per round-trip for `src/`, 4000 bytes for `mapper/`).
 - The debug tree is the best starting point when adapting the project to a new motherboard or firmware layout.
 - The mapper's payload hash uses FNV-1a 64-bit for integrity verification, not cryptographic authentication. Any user who can reach the WMI method can upload an arbitrary payload.
-- All memory copy and zero functions (`CopyMem`, `ZeroMem`, custom `memcpy`/`memset`) are byte-by-byte implementations compiled without CRT. This is intentional (no CRT dependency) but impacts bulk operation throughput.
+- All memory copy and zero functions (`CopyMem`, `ZeroMem`, custom `memcpy`/`memset`) have been optimized to use QWORD (64-bit) wide memory accesses. This greatly improves bulk operation throughput while maintaining zero CRT dependency.
 
 ### SMRAM Footprint
 

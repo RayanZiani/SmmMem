@@ -1,3 +1,26 @@
+/**
+ * MIT License
+ * 
+ * Copyright (c) 2026 Rayan Ziani
+ * 
+ * Permission is hereby granted, free of charge, to any person obtaining a copy
+ * of this software and associated documentation files (the "Software"), to deal
+ * in the Software without restriction, including without limitation the rights
+ * to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+ * copies of the Software, and to permit persons to whom the Software is
+ * furnished to do so, subject to the following conditions:
+ * 
+ * The above copyright notice and this permission notice shall be included in all
+ * copies or substantial portions of the Software.
+ * 
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+ * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+ * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+ * SOFTWARE.
+ */
 #include <intrin.h>
 
 #pragma intrinsic(__inbyte)
@@ -471,17 +494,35 @@ static VOID EFIAPI SerialHex64(UINT64 Value) {
 }
 
 static VOID ZeroMem(VOID *Buffer, UINTN Size) {
-  UINT8 *Ptr = (UINT8 *)Buffer;
+  UINT64 *Ptr64 = (UINT64 *)Buffer;
+  UINTN Count64 = Size / sizeof(UINT64);
+  UINT8 *Ptr8;
+
+  while (Count64--) {
+    *Ptr64++ = 0;
+  }
+  Ptr8 = (UINT8 *)Ptr64;
+  Size &= 7;
   while (Size--) {
-    *Ptr++ = 0;
+    *Ptr8++ = 0;
   }
 }
 
 static VOID CopyMemLocal(VOID *Destination, const VOID *Source, UINTN Size) {
-  UINT8 *Dst = (UINT8 *)Destination;
-  const UINT8 *Src = (const UINT8 *)Source;
+  UINT64 *Dst64 = (UINT64 *)Destination;
+  const UINT64 *Src64 = (const UINT64 *)Source;
+  UINT8 *Dst8;
+  const UINT8 *Src8;
+  UINTN Count64 = Size / sizeof(UINT64);
+
+  while (Count64--) {
+    *Dst64++ = *Src64++;
+  }
+  Dst8 = (UINT8 *)Dst64;
+  Src8 = (const UINT8 *)Src64;
+  Size &= 7;
   while (Size--) {
-    *Dst++ = *Src++;
+    *Dst8++ = *Src8++;
   }
 }
 
@@ -1157,8 +1198,12 @@ static EFI_STATUS EFIAPI ControlSwSmiHandler(EFI_HANDLE DispatchHandle,
   (void)CommBuffer;
   (void)CommBufferSize;
 
-  SerialInit();
-  SerialPrint("control SMI entered\n");
+  static UINTN SerialInitDone = 0;
+
+  if (SerialInitDone == 0) {
+    SerialInit();
+    SerialInitDone = 1;
+  }
 
   if (gMailbox == 0 || gMailbox->Magic != MAILBOX_MAGIC ||
       gMailbox->HeaderSize < sizeof(MAILBOX) ||
