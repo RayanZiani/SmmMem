@@ -481,12 +481,14 @@ This is the proposed implementation plan for the next phase. No code changes are
 - [x] Define configurable request pacing, bounded concurrency, and lifecycle-aware scheduling for repeatable experiments; keep defaults deterministic and observable (`tools/WmiPingBench.c`, ping-only).
 - [x] Document the current transports, identifiers, request boundaries, and COM comparison rules (`docs/WMI_TRANSPORT.md`).
 - [x] Add a bounded ping benchmark with CSV output and high-resolution elapsed-time measurement (`tools/WmiPingBench.c`).
+- [x] Add a read-only COM/WMI inventory utility for `ROOT\WMI` (`tools/WmiInventory.cpp`).
 
 Build and run the benchmark from an x64 Visual Studio Developer Command Prompt:
 
 ```bat
 tools\build.cmd
 tools\Work\WmiPingBench.exe 30 0 > ping.csv
+tools\Work\WmiInventory.exe > wmi-root-wmi.csv
 ```
 
 The benchmark sends `CMD_PING` only. It does not perform memory reads/writes or
