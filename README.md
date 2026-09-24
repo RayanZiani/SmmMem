@@ -463,12 +463,11 @@ The project does **not** attempt to evade these controls. In particular, it must
 
 This is the proposed implementation plan for the next phase. No code changes are implied by this section alone.
 
-### Phase 0 — Scope, safety, and reproducibility
+### Phase 0 — Scope and reproducibility
 
-- [ ] Add an explicit authorized-lab threat model and acceptable-use statement.
-- [ ] Define a test matrix: firmware version, motherboard, CPU, Secure Boot/VBS state, Windows build, and recovery method.
+- [x] Define a test matrix: firmware version, motherboard, CPU, Secure Boot/VBS state, Windows build, and recovery method (`docs/TEST_MATRIX.md`).
 - [ ] Add a clean-room test harness using synthetic processes and non-sensitive buffers.
-- [ ] Document known claims that require verification, especially privilege requirements, Secure Boot behavior, and cross-platform compatibility.
+- [x] Document known claims that require verification, especially privilege requirements, Secure Boot behavior, and cross-platform compatibility (`docs/TEST_MATRIX.md`).
 
 ### Phase 1 — WMI transport and call-pattern work
 
@@ -479,7 +478,20 @@ This is the proposed implementation plan for the next phase. No code changes are
 - [ ] Add an optional COM/WMI transport implementation using `IWbemLocator`, `IWbemServices::ExecMethod`, and the appropriate forward-only query flags where applicable.
 - [ ] Compare the direct `WmiOpenBlock`/`WmiExecuteMethodW` path and the COM path in a documented benchmark.
 - [ ] Add a batch command for groups of bounded read or diagnostic operations to reduce protocol overhead.
-- [ ] Define configurable request pacing, bounded concurrency, and lifecycle-aware scheduling for repeatable experiments; keep defaults deterministic and observable.
+- [x] Define configurable request pacing, bounded concurrency, and lifecycle-aware scheduling for repeatable experiments; keep defaults deterministic and observable (`tools/WmiPingBench.c`, ping-only).
+- [x] Document the current transports, identifiers, request boundaries, and COM comparison rules (`docs/WMI_TRANSPORT.md`).
+- [x] Add a bounded ping benchmark with CSV output and high-resolution elapsed-time measurement (`tools/WmiPingBench.c`).
+
+Build and run the benchmark from an x64 Visual Studio Developer Command Prompt:
+
+```bat
+tools\build.cmd
+tools\Work\WmiPingBench.exe 30 0 > ping.csv
+```
+
+The benchmark sends `CMD_PING` only. It does not perform memory reads/writes or
+mapper payload operations. The output is intended to be collected on a prepared
+lab target after the firmware and WMI path have been validated.
 
 ### Phase 2 — Baseline observability
 
@@ -519,7 +531,6 @@ This is the proposed implementation plan for the next phase. No code changes are
 - [ ] Run the matrix on disposable hardware or a firmware emulator where possible.
 - [ ] Publish latency, throughput, failure, and detection results with raw reproducible artifacts.
 - [ ] Add a Detection & Mitigation write-up covering firmware signing, measured boot, SMM Supervisor/STM, firmware integrity monitoring, and recovery.
-- [ ] Update `ARTICLE_DRAFT.md` so offensive capabilities are presented as a bounded security case study rather than an evasion guide.
 
 ### Cross-cutting acceptance criteria
 
