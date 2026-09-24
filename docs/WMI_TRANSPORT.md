@@ -41,3 +41,19 @@ future COM implementation may be added as a separately selectable transport,
 but it must preserve the same command semantics, bounds, error handling, and
 result schema. It must not silently change the provider or identifier used by
 the reference path.
+
+## Read-only inventory
+
+`tools/WmiInventory.exe` uses `IWbemLocator` and `IWbemServices::ExecQuery` to
+enumerate class names exposed in `ROOT\WMI`. It is intentionally independent of
+the SmmMem GUID and does not invoke a method, write a mailbox, or trigger an
+SMI. Save its CSV output as the pre-installation or post-installation baseline
+for a lab experiment:
+
+```bat
+tools\Work\WmiInventory.exe > wmi-root-wmi.csv
+```
+
+The inventory is a snapshot, not a security verdict. Compare two snapshots
+using a sorted diff and record the Windows build and installed hardware for
+each capture.
