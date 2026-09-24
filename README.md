@@ -6,6 +6,28 @@ Driverless Windows memory access through System Management Mode (SMM) with a use
 
 SmmMem exposes a small Windows client API that can read, write, translate, and resolve memory without installing a kernel driver. The user-mode client talks to an ACPI WMI method, which copies a request into a shared mailbox and rings a software SMI doorbell. The SMM handler then performs the requested operation from Ring −2 and writes the response back to the mailbox.
 
+> **Research and safety scope.** This repository is a firmware-security research PoC. It must only be used on hardware owned by the operator, with explicit authorization and a recovery path for firmware failure. The project currently exposes highly privileged memory and payload-loading capabilities; it is not suitable for production systems.
+
+## Table of Contents
+
+- [Overview](#overview)
+- [Repository Layout](#repository-layout)
+- [Architecture](#architecture)
+- [Request Flow](#request-flow)
+- [Communication Details](#communication-details)
+- [What the SMM Side Does](#what-the-smm-side-does)
+- [User-Mode API](#user-mode-api)
+- [Building](#building)
+- [Firmware Installation](#firmware-installation)
+- [Platform Notes](#platform-notes)
+- [Debug Build (`src_dbg01`)](#debug-build-src_dbg01)
+- [Mapper (`mapper/`)](#mapper-mapper)
+- [Security and Detection](#security-and-detection)
+- [Implementation Roadmap](#implementation-roadmap)
+- [Conventions](#conventions)
+- [Troubleshooting](#troubleshooting)
+- [Notes and Limitations](#notes)
+
 The repository contains three independent firmware trees:
 
 - `src`: release-oriented firmware (Dxe.efi + Smm.efi) and a Windows client library providing 11 memory access primitives
@@ -414,6 +436,98 @@ Mapper-specific failure points:
 - The debug tree is the best starting point when adapting the project to a new motherboard or firmware layout.
 - The mapper's payload hash uses FNV-1a 64-bit for integrity verification, not cryptographic authentication. Any user who can reach the WMI method can upload an arbitrary payload.
 - All memory copy and zero functions (`CopyMem`, `ZeroMem`, custom `memcpy`/`memset`) have been optimized to use QWORD (64-bit) wide memory accesses. This greatly improves bulk operation throughput while maintaining zero CRT dependency.
+
+## Security and Detection
+
+SmmMem is intentionally easy to study as a defender. Its observable and auditable indicators include:
+
+- firmware changes and unexpected DXE/SMM modules;
+- dynamically installed ACPI/WMI devices, custom WMI GUIDs, UIDs, methods, and unusual mailbox sizes;
+- software SMI registration and a repeatable WMI → mailbox → SMI request sequence;
+- SMM execution latency, CPU rendezvous impact, and abnormal SMI frequency;
+- arbitrary physical-memory access, page-table walking, process/module enumeration, and export resolution;
+- the mapper's runtime PE loading, executable SMRAM image, hot reload, unsigned payloads, and FNV-1a-only integrity check;
+- debug UEFI variables, serial traces, and firmware configuration-table markers.
+
+The project does **not** attempt to evade these controls. In particular, it must not impersonate an existing provider, reuse vendor identifiers, alter hardware time sources, patch TSC/MSR values, or add randomized delays solely to defeat detection. Those techniques would reduce research value and could damage system observability. Any future transport comparison should be implemented as a clearly labelled benchmark and detection experiment.
+
+### Defensive evaluation principles
+
+1. Establish a clean firmware and OS baseline before each experiment.
+2. Record firmware hashes, ACPI tables, WMI inventory, SMI counters/latency, and relevant Windows event/ETW telemetry.
+3. Run only benign commands such as health checks and bounded reads against synthetic test data; do not use real credentials or third-party machines.
+4. Compare SmmMem traces with a legitimate monitoring workload without trying to make SmmMem resemble it.
+5. Preserve recovery media, SPI backup, serial output, and a board-specific reflashing procedure.
+
+## Implementation Roadmap
+
+This is the proposed implementation plan for the next phase. No code changes are implied by this section alone.
+
+### Phase 0 — Scope, safety, and reproducibility
+
+- [ ] Add an explicit authorized-lab threat model and acceptable-use statement.
+- [ ] Define a test matrix: firmware version, motherboard, CPU, Secure Boot/VBS state, Windows build, and recovery method.
+- [ ] Add a clean-room test harness using synthetic processes and non-sensitive buffers.
+- [ ] Document known claims that require verification, especially privilege requirements, Secure Boot behavior, and cross-platform compatibility.
+
+### Phase 1 — WMI transport and call-pattern work
+
+- [ ] Inventory the legitimate WMI providers present on the target and document which ACPI/WMI paths are appropriate for a controlled research comparison.
+- [ ] Evaluate whether an existing, legitimate ACPI provider can be used for a non-sensitive diagnostic transport instead of introducing a custom provider.
+- [ ] If a custom provider remains necessary, document stable identifiers, ownership, registration, and lifecycle rather than using unexplained random values.
+- [ ] Reduce the fixed mailbox footprint where protocol-compatible, and define bounded fragments for requests and responses.
+- [ ] Add an optional COM/WMI transport implementation using `IWbemLocator`, `IWbemServices::ExecMethod`, and the appropriate forward-only query flags where applicable.
+- [ ] Compare the direct `WmiOpenBlock`/`WmiExecuteMethodW` path and the COM path in a documented benchmark.
+- [ ] Add a batch command for groups of bounded read or diagnostic operations to reduce protocol overhead.
+- [ ] Define configurable request pacing, bounded concurrency, and lifecycle-aware scheduling for repeatable experiments; keep defaults deterministic and observable.
+
+### Phase 2 — Baseline observability
+
+- [ ] Add opt-in request metadata and bounded counters for command type, request size, response size, and status.
+- [ ] Measure WMI round-trip latency and SMM handler duration with clearly marked instrumentation; do not modify time sources.
+- [ ] Record rejected requests, malformed mailbox states, sequence mismatches, and payload hash failures.
+- [ ] Define a stable CSV/JSON result format and a reproducible benchmark command.
+
+### Phase 3 — SMM timing and execution hygiene
+
+- [ ] Instrument TSC timestamps at SMM handler entry and exit behind an explicit diagnostic build flag.
+- [ ] Separate mailbox validation/copy work from expensive translation, PE parsing, and symbol-resolution work wherever the firmware architecture permits.
+- [ ] Add bounded internal timeouts and explicit failure statuses for operations that may exceed the handler budget.
+- [ ] Add carefully scoped caches for stable process metadata, CR3 values, module bases, and other repeat lookups, with invalidation rules.
+- [ ] Measure per-command SMM duration, CPU rendezvous impact, timeout rate, and tail latency.
+- [ ] Document platform-specific SMI dispatch capabilities and evaluate direct dispatch only where the platform specification and recovery plan support it.
+- [ ] Do not alter TSC, APIC timers, MSRs, or other time sources; timing data must remain trustworthy and auditable.
+
+### Phase 4 — Defensive detection experiments
+
+- [ ] Inventory ACPI/WMI objects before and after installation and produce a diff report.
+- [ ] Build a lab-only detector for new PNP0C14 devices, WMI identifiers, AML markers, and suspicious mailbox/SMI relationships.
+- [ ] Correlate WMI-Activity/ETW data with SMI latency and firmware debug records.
+- [ ] Add a detector for mapper-specific behaviors: payload staging, reloads, executable SMRAM regions, and weak integrity authentication.
+- [ ] Document false positives and detection blind spots.
+
+### Phase 5 — Safety hardening
+
+- [ ] Make write operations and arbitrary payload loading disabled by default in research builds.
+- [ ] Add explicit authorization/configuration gates and fail closed on invalid or stale configuration.
+- [ ] Replace unauthenticated FNV-1a payload acceptance with a documented cryptographic verification design, or remove runtime payload loading from the default build.
+- [ ] Bound all copies, addresses, command sizes, retries, and handler execution time; test malformed and concurrent requests.
+- [ ] Review mailbox lifetime, ACPI table installation, ExitBootServices behavior, and the temporary communication-region mutation.
+
+### Phase 6 — Validation and documentation
+
+- [ ] Run the matrix on disposable hardware or a firmware emulator where possible.
+- [ ] Publish latency, throughput, failure, and detection results with raw reproducible artifacts.
+- [ ] Add a Detection & Mitigation write-up covering firmware signing, measured boot, SMM Supervisor/STM, firmware integrity monitoring, and recovery.
+- [ ] Update `ARTICLE_DRAFT.md` so offensive capabilities are presented as a bounded security case study rather than an evasion guide.
+
+### Cross-cutting acceptance criteria
+
+- [ ] Every transport variant has a documented protocol description, ownership model, identifier registry, and rollback procedure.
+- [ ] Every timing change is backed by before/after measurements collected without changing hardware time sources.
+- [ ] Every batching, fragmentation, pacing, or caching change has correctness tests for ordering, timeouts, partial transfers, cancellation, and concurrent callers.
+- [ ] Every platform-specific behavior is feature-detected and has a safe fallback.
+- [ ] Every experiment produces enough metadata to reproduce the result and distinguish firmware, OS, transport, and workload effects.
 
 ### SMRAM Footprint
 
