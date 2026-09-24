@@ -471,17 +471,19 @@ This is the proposed implementation plan for the next phase. No code changes are
 
 ### Phase 1 — WMI transport and call-pattern work
 
-- [ ] Inventory the legitimate WMI providers present on the target and document which ACPI/WMI paths are appropriate for a controlled research comparison.
-- [ ] Evaluate whether an existing, legitimate ACPI provider can be used for a non-sensitive diagnostic transport instead of introducing a custom provider.
-- [ ] If a custom provider remains necessary, document stable identifiers, ownership, registration, and lifecycle rather than using unexplained random values.
-- [ ] Reduce the fixed mailbox footprint where protocol-compatible, and define bounded fragments for requests and responses.
-- [ ] Add an optional COM/WMI transport implementation using `IWbemLocator`, `IWbemServices::ExecMethod`, and the appropriate forward-only query flags where applicable.
-- [ ] Compare the direct `WmiOpenBlock`/`WmiExecuteMethodW` path and the COM path in a documented benchmark.
-- [ ] Add a batch command for groups of bounded read or diagnostic operations to reduce protocol overhead.
+- [x] Inventory the WMI providers present on the target and document which ACPI/WMI paths are available for a controlled research comparison (`tools/WmiProviderInventory.cpp`).
+- [x] Evaluate existing providers as inventory data without substituting them for the project-owned diagnostic transport (`docs/WMI_TRANSPORT.md`).
+- [x] Document stable identifiers, ownership, registration, and lifecycle for the project-owned transports (`docs/WMI_TRANSPORT.md`).
+- [x] Define current mailbox boundaries and bounded request/response fragments; protocol changes remain a separate compatibility task (`docs/WMI_TRANSPORT.md`).
+- [ ] Add an optional COM/WMI `ExecMethod` implementation for the privileged project channel — deferred pending an explicit protocol-compatibility design and isolated validation.
+- [ ] Compare direct `WmiOpenBlock`/`WmiExecuteMethodW` with a COM project-channel transport — deferred with the COM implementation.
+- [ ] Add a batch command for groups of memory operations — deferred to the safety-hardening and authorization design; the current benchmark remains ping-only.
 - [x] Define configurable request pacing, bounded concurrency, and lifecycle-aware scheduling for repeatable experiments; keep defaults deterministic and observable (`tools/WmiPingBench.c`, ping-only).
 - [x] Document the current transports, identifiers, request boundaries, and COM comparison rules (`docs/WMI_TRANSPORT.md`).
 - [x] Add a bounded ping benchmark with CSV output and high-resolution elapsed-time measurement (`tools/WmiPingBench.c`).
 - [x] Add a read-only COM/WMI inventory utility for `ROOT\WMI` (`tools/WmiInventory.cpp`).
+- [x] Add a read-only provider inventory for `ROOT\CIMV2::__Win32Provider` (`tools/WmiProviderInventory.cpp`).
+- [x] Add a snapshot comparison tool with normalized class/provider CSV output and change exit codes (`tools/compare_wmi_snapshots.py`).
 
 Build and run the benchmark from an x64 Visual Studio Developer Command Prompt:
 
@@ -494,6 +496,16 @@ tools\Work\WmiInventory.exe > wmi-root-wmi.csv
 The benchmark sends `CMD_PING` only. It does not perform memory reads/writes or
 mapper payload operations. The output is intended to be collected on a prepared
 lab target after the firmware and WMI path have been validated.
+
+### Phase 1 completion note
+
+The safe, observational portion of Phase 1 is complete: the project now has
+transport documentation, class and provider inventories, snapshot comparison,
+and a bounded ping benchmark with reproducible CSV output. The remaining
+unchecked items are intentionally deferred because they would change the
+privileged protocol or increase its operation density before authorization,
+compatibility, and safety controls are defined. Phase 2 can proceed using the
+current ping-only path and the inventory artifacts.
 
 ### Phase 2 — Baseline observability
 

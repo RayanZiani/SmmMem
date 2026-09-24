@@ -57,3 +57,59 @@ tools\Work\WmiInventory.exe > wmi-root-wmi.csv
 The inventory is a snapshot, not a security verdict. Compare two snapshots
 using a sorted diff and record the Windows build and installed hardware for
 each capture.
+
+`tools/WmiProviderInventory.exe` provides a separate read-only provider
+snapshot from `ROOT\CIMV2` using the `__Win32Provider` class. It records the
+provider name, CLSID, and hosting model without invoking provider methods:
+
+```bat
+tools\Work\WmiProviderInventory.exe > wmi-providers.csv
+```
+
+Provider names and CLSIDs are inventory data, not identifiers to copy into the
+project. Any comparison must preserve the original values and record the
+machine and Windows build from which the snapshot was taken.
+
+## Phase 1 exit criteria
+
+Completed:
+
+- current project-owned WMI identifiers and mailbox boundaries are documented;
+- class and provider inventories are available as read-only CSV tools;
+- snapshots can be compared with schema validation and deterministic exit codes;
+- the reference transport has a ping-only latency benchmark.
+
+Deferred:
+
+- a COM `ExecMethod` path for the privileged project protocol;
+- transport equivalence benchmarking between direct WMI and COM;
+- batching memory operations;
+- changing mailbox sizes or protocol fragmentation.
+
+These items require a separate compatibility and authorization design. The
+current phase deliberately avoids changing the privileged protocol or adding
+more memory operations to the benchmark workload.
+
+Use the repository comparison tool to produce both a summary and a complete
+row-by-row report. It supports both the class snapshot schema
+`namespace,class_name` and the provider snapshot schema
+`name,clsid,hosting_model`:
+
+```bat
+tools\Work\WmiInventory.exe > before.csv
+rem Perform the authorized lab change or installation here.
+tools\Work\WmiInventory.exe > after.csv
+py tools\compare_wmi_snapshots.py before.csv after.csv --output wmi-diff.csv --fail-on-change
+```
+
+For provider snapshots:
+
+```bat
+tools\Work\WmiProviderInventory.exe > providers-before.csv
+rem Perform the authorized lab change or installation here.
+tools\Work\WmiProviderInventory.exe > providers-after.csv
+py tools\compare_wmi_snapshots.py providers-before.csv providers-after.csv --output providers-diff.csv --fail-on-change
+```
+
+Exit codes are `0` for no change, `1` for a detected change when
+`--fail-on-change` is used, and `2` for invalid input or an I/O error.
