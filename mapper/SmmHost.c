@@ -1064,7 +1064,8 @@ static EFI_STATUS ReloadPayloadFromMailbox(VOID) {
   if (PayloadSize == 0 || PayloadSize >= PAYLOAD_FILE_LIMIT ||
       PayloadSize > gMailbox->PayloadCapacity ||
       gMailbox->PayloadOffset < gMailbox->HeaderSize ||
-      gMailbox->PayloadOffset + PayloadSize > gMailbox->TotalSize) {
+      gMailbox->PayloadOffset > gMailbox->TotalSize ||
+      PayloadSize > gMailbox->TotalSize - gMailbox->PayloadOffset) {
     SerialPrint("hot reload payload bounds rejected\n");
     return EFI_INVALID_PARAMETER;
   }
@@ -1157,7 +1158,8 @@ static EFI_STATUS ProcessWmiRequest(VOID) {
     Status = UnloadPayload("WMI unload");
   } else if (Command == WMI_COMMAND_STAGE_CHUNK) {
     if (DataSize > WMI_REQUEST_SIZE - WMI_REQUEST_HEADER_SIZE ||
-        Request->Offset + DataSize > PAYLOAD_FILE_LIMIT) {
+        Request->Offset > PAYLOAD_FILE_LIMIT ||
+        DataSize > PAYLOAD_FILE_LIMIT - Request->Offset) {
       Status = EFI_INVALID_PARAMETER;
     } else {
       CopyMemLocal(gPayloadFile + Request->Offset, Request->Data, DataSize);
@@ -1256,7 +1258,8 @@ static EFI_STATUS EFIAPI CommunicationHandler(EFI_HANDLE DispatchHandle,
   } else if (Message->Command == COMM_LOAD_MAILBOX) {
     if (gMailbox == 0 ||
         gMailbox->PayloadOffset < gMailbox->HeaderSize ||
-        gMailbox->PayloadOffset + PayloadSize > gMailbox->TotalSize ||
+        gMailbox->PayloadOffset > gMailbox->TotalSize ||
+        PayloadSize > gMailbox->TotalSize - gMailbox->PayloadOffset ||
         gMailbox->PayloadSize != PayloadSize) {
       SerialPrint("mailbox payload bounds rejected\n");
       return EFI_INVALID_PARAMETER;
