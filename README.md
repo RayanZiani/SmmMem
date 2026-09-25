@@ -509,10 +509,10 @@ current ping-only path and the inventory artifacts.
 
 ### Phase 2 — Baseline observability
 
-- [ ] Add opt-in request metadata and bounded counters for command type, request size, response size, and status.
-- [ ] Measure WMI round-trip latency and SMM handler duration with clearly marked instrumentation; do not modify time sources.
-- [ ] Record rejected requests, malformed mailbox states, sequence mismatches, and payload hash failures.
-- [ ] Define a stable CSV/JSON result format and a reproducible benchmark command.
+- [x] Add request metadata to the ping benchmark: protocol, command, request size, response capacity, instance, and status (`tools/WmiPingBench.c`).
+- [x] Measure WMI round-trip latency and SMM handler duration with clearly marked instrumentation; do not modify time sources (`src_dbg01` runtime counters and `tools/WmiPingBench.c`).
+- [ ] Record rejected requests, malformed mailbox states, sequence mismatches, and payload hash failures; the current debug counters cover aggregate errors and last status only.
+- [x] Define a stable CSV/JSON result format and a reproducible benchmark command (`tools/summarize_ping.py`, schema `smmmem.wmi-ping.v1`).
 
 ### Phase 3 — SMM timing and execution hygiene
 

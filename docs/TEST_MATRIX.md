@@ -35,7 +35,22 @@ For each successful test, collect at least 30 samples where practical:
 - serial/debug trace records;
 - CPU and system impact observable from the lab instrumentation.
 
+The ping benchmark CSV uses the `smmmem.wmi-ping.v1` input schema. Convert it
+to a machine-readable summary with:
+
+```bat
+py tools\summarize_ping.py ping.csv --output ping-summary.json --fail-on-error
+```
+
+The summary records the protocol, command, buffer sizes, sample count, failure
+count, selected instances, and min/mean/median/max latency in microseconds.
+
 Do not modify TSC, APIC timers, MSRs, or other system time sources to obtain measurements.
+
+The debug firmware records SMM duration in TSC cycles for each request and
+exposes the last, maximum, total, request count, error count, and last command
+through `SmmMemSmmDebug`. The counters are observational only: the firmware
+does not write or adjust any time source.
 
 ## Compatibility claims to verify
 
