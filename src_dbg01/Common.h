@@ -82,6 +82,7 @@ typedef UINT64 EFI_PHYSICAL_ADDRESS;
 #define DEBUG_MAGIC 0x4742444D454D4D53ULL
 #define DEBUG_TRACE_MAGIC 0x45434152544D4D53ULL
 #define DEBUG_RECORD_COUNT 48U
+#define DEBUG_RUNTIME_TIMING 1U
 
 #define DBG_DXE_ENTRY 0x100U
 #define DBG_DXE_MAILBOX_OK 0x110U
@@ -342,6 +343,13 @@ typedef struct {
   UINT32 SmmConfigured;
   UINT32 ConfigureAttempts;
   UINT32 Reserved;
+  UINT64 RuntimeRequestCount;
+  UINT64 RuntimeErrorCount;
+  UINT32 RuntimeLastCommand;
+  UINT32 RuntimeLastStatus;
+  UINT64 RuntimeLastCycles;
+  UINT64 RuntimeMaxCycles;
+  UINT64 RuntimeTotalCycles;
 } DEBUG_STATE;
 
 typedef struct {

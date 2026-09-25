@@ -29,6 +29,7 @@
 #pragma intrinsic(__readcr3)
 #pragma intrinsic(__readmsr)
 #pragma intrinsic(__cpuidex)
+#pragma intrinsic(__rdtsc)
 #pragma function(memset)
 #pragma function(memcpy)
 
@@ -1022,13 +1023,43 @@ static EFI_STATUS HandleRequest(REQUEST *Request, RESPONSE *Response) {
 static EFI_STATUS ProcessRequest(VOID) {
   REQUEST *Request;
   RESPONSE *Response;
+  EFI_STATUS Status;
+#if DEBUG_RUNTIME_TIMING
+  UINT64 Start;
+  UINT64 End;
+#endif
 
+#if DEBUG_RUNTIME_TIMING
+  Start = __rdtsc();
+#endif
   if (gMailboxPhysical == 0 || gMailboxSize < MAILBOX_SIZE) {
-    return EFI_NOT_FOUND;
+    Status = EFI_NOT_FOUND;
+    goto RecordRuntime;
   }
   Request = (REQUEST *)(UINTN)gMailboxPhysical;
   Response = (RESPONSE *)(UINTN)(gMailboxPhysical + RESPONSE_OFFSET);
-  return HandleRequest(Request, Response);
+  Status = HandleRequest(Request, Response);
+
+RecordRuntime:
+#if DEBUG_RUNTIME_TIMING
+  End = __rdtsc();
+  gSmmDebugState.RuntimeRequestCount++;
+  if (EFI_ERROR(Status)) {
+    gSmmDebugState.RuntimeErrorCount++;
+  }
+  gSmmDebugState.RuntimeLastCommand =
+      (gMailboxPhysical != 0 && gMailboxSize >= MAILBOX_SIZE)
+          ? ((REQUEST *)(UINTN)gMailboxPhysical)->Command
+          : 0;
+  gSmmDebugState.RuntimeLastStatus = (UINT32)Status;
+  gSmmDebugState.RuntimeLastCycles = End - Start;
+  if (gSmmDebugState.RuntimeLastCycles > gSmmDebugState.RuntimeMaxCycles) {
+    gSmmDebugState.RuntimeMaxCycles = gSmmDebugState.RuntimeLastCycles;
+  }
+  gSmmDebugState.RuntimeTotalCycles += gSmmDebugState.RuntimeLastCycles;
+  SaveSmmDebug();
+#endif
+  return Status;
 }
 
 static EFI_STATUS EFIAPI SwSmiHandler(EFI_HANDLE DispatchHandle,

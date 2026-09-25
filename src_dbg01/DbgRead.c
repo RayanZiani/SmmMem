@@ -80,6 +80,13 @@ typedef struct {
   uint32_t SmmConfigured;
   uint32_t ConfigureAttempts;
   uint32_t Reserved;
+  uint64_t RuntimeRequestCount;
+  uint64_t RuntimeErrorCount;
+  uint32_t RuntimeLastCommand;
+  uint32_t RuntimeLastStatus;
+  uint64_t RuntimeLastCycles;
+  uint64_t RuntimeMaxCycles;
+  uint64_t RuntimeTotalCycles;
 } DEBUG_STATE;
 
 typedef struct {
@@ -213,6 +220,14 @@ static void PrintState(const char *Name, const DEBUG_STATE *State,
   printf("  wmi=%u smm_configured=%u attempts=%u\n",
          State->WmiInstalled, State->SmmConfigured,
          State->ConfigureAttempts);
+  printf("  runtime_requests=%llu errors=%llu last_command=%u "
+         "last_status=0x%X last_cycles=%llu max_cycles=%llu total_cycles=%llu\n",
+         (unsigned long long)State->RuntimeRequestCount,
+         (unsigned long long)State->RuntimeErrorCount,
+         State->RuntimeLastCommand, State->RuntimeLastStatus,
+         (unsigned long long)State->RuntimeLastCycles,
+         (unsigned long long)State->RuntimeMaxCycles,
+         (unsigned long long)State->RuntimeTotalCycles);
 }
 
 static void PrintTrace(const DEBUG_TRACE *Trace, DWORD Size,
