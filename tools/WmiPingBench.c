@@ -124,7 +124,8 @@ int wmain(int argc, wchar_t **argv) {
     return 1;
   }
 
-  wprintf(L"iteration,instance,elapsed_us,wmi_status,response_status\n");
+  wprintf(L"protocol,command,request_size,response_capacity,iteration,instance,"
+          L"elapsed_us,wmi_status,response_status\n");
   for (Index = 0; Index < Iterations; Index++) {
     ULONG OutSize = sizeof(Output);
     ULONG WmiStatus = ERROR_NOT_FOUND;
@@ -148,7 +149,8 @@ int wmain(int argc, wchar_t **argv) {
       OutSize = sizeof(Output);
     }
     End = NowTicks();
-    wprintf(L"%lu,%ls,%.2f,0x%08lX,0x%08X\n", Index + 1, UsedInstance,
+    wprintf(L"src-direct-wmi,CMD_PING,%u,%u,%lu,%ls,%.2f,0x%08lX,0x%08X\n",
+            REQUEST_SIZE, RESPONSE_SIZE, Index + 1, UsedInstance,
             TicksToMicroseconds(End - Start, Frequency), WmiStatus,
             (WmiStatus == ERROR_SUCCESS && OutSize >= 16 &&
                      Response->Magic == RESP_MAGIC
