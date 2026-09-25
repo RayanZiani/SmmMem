@@ -16,10 +16,21 @@ identified in documentation and test output.
 
 ## Current identifiers
 
-| Transport | GUID | Method | Primary instances | Request size |
-|---|---|---:|---|---:|
-| `src/` memory API | `A0C9F8DE-0B71-42A8-B967-E538EACB6F21` | 1 | `Mem_0`, `SMMM_0`, `0_0` | 4096 |
-| `mapper/` control API | `9B6F1A20-31D5-44DF-9A9C-157F4307914B` | 1 | `SmmMapper_0`, `SMMP_0`, `0_0` | 4096 |
+| Transport | GUID | Method | Primary instances | Request size | Request data | Response size | Response data/log |
+|---|---|---:|---|---:|---:|---:|---:|
+| `src/` memory API | `A0C9F8DE-0B71-42A8-B967-E538EACB6F21` | 1 | `Mem_0`, `SMMM_0`, `0_0` | 4096 | bounded by request fields | 512 | 352 |
+| `mapper/` control API | `9B6F1A20-31D5-44DF-9A9C-157F4307914B` | 1 | `SmmMapper_0`, `SMMP_0`, `0_0` | 4096 | 4000 | 512 | 464 |
+
+Both transports use a 4096-byte request buffer and a 512-byte WMI response
+buffer. The `src/` protocol exposes a bounded 352-byte response data field.
+The mapper accepts up to 4000 bytes of request data per staging call and its
+response carries status metadata plus a bounded 464-byte debug-log fragment.
+
+The source constants and these documented capacities can be checked offline:
+
+```bat
+py tools\check_protocol_consistency.py
+```
 
 Identifiers are project-owned and must not be changed during a benchmark. Any
 future transport experiment needs a new experiment identifier and a separate
