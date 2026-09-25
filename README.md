@@ -113,6 +113,9 @@ The shared protocol is defined in `Common.h` and mirrored in `Client.c`:
 - Mailbox size: `0x2000`
 - Request buffer: first `0x1000`
 - Response buffer: starts at offset `0x1000`
+- WMI request size: `4096` bytes
+- WMI response size: `512` bytes
+- `src/` response data capacity: `352` bytes
 - SW SMI value: `0xD6`
 - WMI GUID: `A0C9F8DE-0B71-42A8-B967-E538EACB6F21`
 
@@ -432,7 +435,7 @@ Mapper-specific failure points:
 
 - The project is designed around firmware-based access, not a Windows kernel driver.
 - The SMM handler is event-driven; it only runs when an SMI is triggered.
-- `Client.c` chunks read and write operations to match the fixed response payload size (4048 bytes per round-trip for `src/`, 4000 bytes for `mapper/`).
+- `Client.c` chunks `src/` memory transfers to the 352-byte response data field; the mapper stages payload chunks up to 4000 bytes per WMI request.
 - The debug tree is the best starting point when adapting the project to a new motherboard or firmware layout.
 - The mapper's payload hash uses FNV-1a 64-bit for integrity verification, not cryptographic authentication. Any user who can reach the WMI method can upload an arbitrary payload.
 - All memory copy and zero functions (`CopyMem`, `ZeroMem`, custom `memcpy`/`memset`) have been optimized to use QWORD (64-bit) wide memory accesses. This greatly improves bulk operation throughput while maintaining zero CRT dependency.
@@ -448,8 +451,6 @@ SmmMem is intentionally easy to study as a defender. Its observable and auditabl
 - arbitrary physical-memory access, page-table walking, process/module enumeration, and export resolution;
 - the mapper's runtime PE loading, executable SMRAM image, hot reload, unsigned payloads, and FNV-1a-only integrity check;
 - debug UEFI variables, serial traces, and firmware configuration-table markers.
-
-The project does **not** attempt to evade these controls. In particular, it must not impersonate an existing provider, reuse vendor identifiers, alter hardware time sources, patch TSC/MSR values, or add randomized delays solely to defeat detection. Those techniques would reduce research value and could damage system observability. Any future transport comparison should be implemented as a clearly labelled benchmark and detection experiment.
 
 ### Defensive evaluation principles
 
@@ -485,6 +486,7 @@ This is the proposed implementation plan for the next phase. No code changes are
 - [x] Add a read-only COM/WMI inventory utility for `ROOT\WMI` (`tools/WmiInventory.cpp`).
 - [x] Add a read-only provider inventory for `ROOT\CIMV2::__Win32Provider` (`tools/WmiProviderInventory.cpp`).
 - [x] Add a snapshot comparison tool with normalized class/provider CSV output and change exit codes (`tools/compare_wmi_snapshots.py`).
+- [x] Add an offline protocol consistency check covering request/response sizes, mailbox offsets, SMI values, GUIDs, and documented transport capacities (`tools/check_protocol_consistency.py`).
 
 Build and run the benchmark from an x64 Visual Studio Developer Command Prompt:
 
@@ -492,6 +494,7 @@ Build and run the benchmark from an x64 Visual Studio Developer Command Prompt:
 tools\build.cmd
 tools\Work\WmiPingBench.exe 30 0 > ping.csv
 tools\Work\WmiInventory.exe > wmi-root-wmi.csv
+py tools\check_protocol_consistency.py
 ```
 
 The benchmark sends `CMD_PING` only. It does not perform memory reads/writes or
