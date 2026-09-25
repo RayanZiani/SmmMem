@@ -87,6 +87,11 @@ typedef struct {
   uint64_t RuntimeLastCycles;
   uint64_t RuntimeMaxCycles;
   uint64_t RuntimeTotalCycles;
+  uint64_t RuntimeInvalidMagicCount;
+  uint64_t RuntimeInvalidSizeCount;
+  uint64_t RuntimeInvalidCommandCount;
+  uint64_t RuntimeSequenceAnomalyCount;
+  uint64_t RuntimeLastSequence;
 } DEBUG_STATE;
 
 typedef struct {
@@ -228,6 +233,13 @@ static void PrintState(const char *Name, const DEBUG_STATE *State,
          (unsigned long long)State->RuntimeLastCycles,
          (unsigned long long)State->RuntimeMaxCycles,
          (unsigned long long)State->RuntimeTotalCycles);
+  printf("  invalid_magic=%llu invalid_size=%llu invalid_command=%llu "
+         "sequence_anomalies=%llu last_sequence=%llu\n",
+         (unsigned long long)State->RuntimeInvalidMagicCount,
+         (unsigned long long)State->RuntimeInvalidSizeCount,
+         (unsigned long long)State->RuntimeInvalidCommandCount,
+         (unsigned long long)State->RuntimeSequenceAnomalyCount,
+         (unsigned long long)State->RuntimeLastSequence);
 }
 
 static void PrintTrace(const DEBUG_TRACE *Trace, DWORD Size,

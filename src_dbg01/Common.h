@@ -46,6 +46,7 @@ typedef UINT64 EFI_PHYSICAL_ADDRESS;
 #define EFI_UNSUPPORTED 3
 #define EFI_OUT_OF_RESOURCES 9
 #define EFI_NOT_FOUND 14
+#define EFI_TIMEOUT 18
 #define EFI_ERROR(Status) ((Status) != EFI_SUCCESS)
 
 #define SW_SMI_VALUE 0xD6U
@@ -83,6 +84,7 @@ typedef UINT64 EFI_PHYSICAL_ADDRESS;
 #define DEBUG_TRACE_MAGIC 0x45434152544D4D53ULL
 #define DEBUG_RECORD_COUNT 48U
 #define DEBUG_RUNTIME_TIMING 1U
+#define DEBUG_REQUEST_BUDGET_CYCLES 5000000ULL
 
 #define DBG_DXE_ENTRY 0x100U
 #define DBG_DXE_MAILBOX_OK 0x110U
@@ -350,6 +352,11 @@ typedef struct {
   UINT64 RuntimeLastCycles;
   UINT64 RuntimeMaxCycles;
   UINT64 RuntimeTotalCycles;
+  UINT64 RuntimeInvalidMagicCount;
+  UINT64 RuntimeInvalidSizeCount;
+  UINT64 RuntimeInvalidCommandCount;
+  UINT64 RuntimeSequenceAnomalyCount;
+  UINT64 RuntimeLastSequence;
 } DEBUG_STATE;
 
 typedef struct {

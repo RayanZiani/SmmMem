@@ -84,6 +84,10 @@ static UINT32 gNameOffset;
 static UINT32 gPebOffset;
 static UINT32 gCr3Offset;
 static UINT64 gPhysMask;
+static UINT64 gRequestStartCycles;
+static UINT64 gLastRequestSequence;
+static UINT32 gCachedProcessPid;
+static UINT64 gCachedProcessEprocess;
 static DEBUG_STATE gSmmDebugState;
 static CHAR16 gSmmDebugName[] = {
     'S', 'm', 'm', 'M', 'e', 'm', 'S', 'm', 'm', 'D', 'e', 'b', 'u', 'g', 0};
@@ -252,6 +256,15 @@ static BOOLEAN IsUserPtr(UINT64 Value) {
   return Value >= 0x10000ULL && Value < 0x0000800000000000ULL;
 }
 
+static BOOLEAN RequestBudgetExceeded(VOID) {
+#if DEBUG_RUNTIME_TIMING
+  return gRequestStartCycles != 0 &&
+         (__rdtsc() - gRequestStartCycles) > DEBUG_REQUEST_BUDGET_CYCLES;
+#else
+  return 0;
+#endif
+}
+
 static EFI_STATUS CopyPhys(UINT64 Address, VOID *Buffer, UINTN Size,
                            BOOLEAN Write) {
   SMM_CPU_IO Access;
@@ -339,6 +352,9 @@ static EFI_STATUS CopyVirtCr3(UINT64 Cr3, UINT64 Va, VOID *Buffer,
     if (Chunk > Size) {
       Chunk = Size;
     }
+    if (RequestBudgetExceeded()) {
+      return EFI_TIMEOUT;
+    }
     if (EFI_ERROR(TranslateCr3(Cr3, Va, &Pa))) {
       return EFI_NOT_FOUND;
     }
@@ -370,6 +386,9 @@ static EFI_STATUS ReadAscii(UINT64 Cr3, UINT64 Va, char *Out, UINTN OutSize) {
     return EFI_INVALID_PARAMETER;
   }
   for (Index = 0; Index + 1 < OutSize; Index++) {
+    if (RequestBudgetExceeded()) {
+      return EFI_TIMEOUT;
+    }
     if (CopyVirtCr3(Cr3, Va + Index, &Out[Index], 1, 0) != EFI_SUCCESS) {
       return EFI_NOT_FOUND;
     }
@@ -399,6 +418,9 @@ static EFI_STATUS ReadUnicodeName(UINT64 Cr3, UINT64 StringAddress,
   }
   for (Index = 0; Index < Count; Index++) {
     UINT16 Ch;
+    if (RequestBudgetExceeded()) {
+      return EFI_TIMEOUT;
+    }
     if (ReadVirt16(Cr3, Buffer + Index * 2, &Ch) != EFI_SUCCESS) {
       return EFI_NOT_FOUND;
     }
@@ -459,6 +481,9 @@ static EFI_STATUS ResolveExport(UINT64 Cr3, UINT64 Base, const char *Name,
     UINT16 Ordinal;
     UINT32 FunctionRva;
     char ExportName[128];
+    if (RequestBudgetExceeded()) {
+      return EFI_TIMEOUT;
+    }
     if (ReadVirt32(Cr3, Base + NamesRva + Index * 4, &NameRva) != EFI_SUCCESS ||
         ReadAscii(Cr3, Base + NameRva, ExportName, sizeof(ExportName)) !=
             EFI_SUCCESS) {
@@ -524,6 +549,9 @@ static EFI_STATUS ResolveListLayout(VOID) {
   }
   for (PidOffset = 0x20; PidOffset < 0x900; PidOffset += 8) {
     UINT64 Pid;
+    if (RequestBudgetExceeded()) {
+      return EFI_TIMEOUT;
+    }
     if (ReadVirt64(gKernelCr3, gSystemProcess + PidOffset, &Pid) ==
             EFI_SUCCESS &&
         (UINT32)Pid == 4 &&
@@ -544,6 +572,9 @@ static EFI_STATUS ResolveNameOffset(VOID) {
   }
   for (Offset = 0x100; Offset < 0x900; Offset++) {
     char Name[NAME_SIZE];
+    if (RequestBudgetExceeded()) {
+      return EFI_TIMEOUT;
+    }
     ZeroMem(Name, sizeof(Name));
     if (CopyVirtCr3(gKernelCr3, gSystemProcess + Offset, Name,
                     sizeof(Name) - 1, 0) == EFI_SUCCESS &&
@@ -564,6 +595,9 @@ static EFI_STATUS ResolveCr3Offset(VOID) {
   for (Offset = 0x20; Offset < 0x100; Offset += 8) {
     UINT64 Cr3;
     UINT16 Mz;
+    if (RequestBudgetExceeded()) {
+      return EFI_TIMEOUT;
+    }
     if (ReadVirt64(gKernelCr3, gSystemProcess + Offset, &Cr3) != EFI_SUCCESS ||
         Cr3 == 0 || (Cr3 & 0xFFFULL) != 0) {
       continue;
@@ -588,6 +622,9 @@ static EFI_STATUS TryKernelCr3(UINT64 Cr3, UINT64 Lstar) {
   Limit = Start > 0x10000000ULL ? Start - 0x10000000ULL : 0;
   for (Base = Start; Base > Limit; Base -= LARGE_PAGE_SIZE) {
     UINT16 Mz;
+    if (RequestBudgetExceeded()) {
+      return EFI_TIMEOUT;
+    }
     if (ReadVirt16(gKernelCr3, Base, &Mz) != EFI_SUCCESS || Mz != 0x5A4D) {
       continue;
     }
@@ -615,12 +652,18 @@ static EFI_STATUS InitKernel(VOID) {
   }
   Lstar = __readmsr(MSR_LSTAR);
   for (Cpu = 0; Cpu < gSmst->NumberOfCpus; Cpu++) {
+    if (RequestBudgetExceeded()) {
+      return EFI_TIMEOUT;
+    }
     if (ReadSavedCr3(Cpu, &Cr3) == EFI_SUCCESS && Cr3 < 0x100000000ULL &&
         TryKernelCr3(Cr3, Lstar) == EFI_SUCCESS) {
       return EFI_SUCCESS;
     }
   }
   for (Cpu = 0; Cpu < gSmst->NumberOfCpus; Cpu++) {
+    if (RequestBudgetExceeded()) {
+      return EFI_TIMEOUT;
+    }
     if (ReadSavedCr3(Cpu, &Cr3) == EFI_SUCCESS &&
         TryKernelCr3(Cr3, Lstar) == EFI_SUCCESS) {
       return EFI_SUCCESS;
@@ -631,14 +674,35 @@ static EFI_STATUS InitKernel(VOID) {
 }
 
 static EFI_STATUS ResolveProcessLayout(VOID) {
+  EFI_STATUS Status;
   if (gPidOffset != 0 && gLinksOffset != 0 && gCr3Offset != 0) {
     return EFI_SUCCESS;
   }
-  if (InitKernel() != EFI_SUCCESS || ResolveListLayout() != EFI_SUCCESS ||
-      ResolveCr3Offset() != EFI_SUCCESS) {
+  Status = InitKernel();
+  if (Status == EFI_TIMEOUT) {
+    return Status;
+  }
+  if (EFI_ERROR(Status)) {
     return EFI_NOT_FOUND;
   }
-  ResolveNameOffset();
+  Status = ResolveListLayout();
+  if (Status == EFI_TIMEOUT) {
+    return Status;
+  }
+  if (EFI_ERROR(Status)) {
+    return EFI_NOT_FOUND;
+  }
+  Status = ResolveCr3Offset();
+  if (Status == EFI_TIMEOUT) {
+    return Status;
+  }
+  if (EFI_ERROR(Status)) {
+    return EFI_NOT_FOUND;
+  }
+  Status = ResolveNameOffset();
+  if (Status == EFI_TIMEOUT) {
+    return Status;
+  }
   return EFI_SUCCESS;
 }
 
@@ -666,6 +730,9 @@ static EFI_STATUS FindPeb(UINT64 Eprocess, UINT64 Cr3, UINT64 *Peb) {
   for (Offset = 0x100; Offset < 0x900; Offset += 8) {
     UINT64 Candidate;
     UINT64 Ldr;
+    if (RequestBudgetExceeded()) {
+      return EFI_TIMEOUT;
+    }
     if (ReadVirt64(gKernelCr3, Eprocess + Offset, &Candidate) != EFI_SUCCESS ||
         !IsUserPtr(Candidate) ||
         ReadVirt64(Cr3, Candidate + 0x18, &Ldr) != EFI_SUCCESS ||
@@ -741,12 +808,27 @@ static EFI_STATUS FindProcessPid(UINT32 Pid, PROCESS_INFO *Info) {
   UINT64 Head;
   UINT64 Link;
   UINT32 Guard;
+  EFI_STATUS Status;
 
-  if (ResolveProcessLayout() != EFI_SUCCESS) {
-    return EFI_NOT_FOUND;
+  Status = ResolveProcessLayout();
+  if (Status != EFI_SUCCESS) {
+    return Status == EFI_TIMEOUT ? Status : EFI_NOT_FOUND;
+  }
+  if (gCachedProcessPid == Pid && gCachedProcessEprocess != 0) {
+    if (FillProcessInfo(gCachedProcessEprocess, Info) == EFI_SUCCESS &&
+        Info->Pid == Pid) {
+      return EFI_SUCCESS;
+    }
+    gCachedProcessPid = 0;
+    gCachedProcessEprocess = 0;
   }
   if (Pid == 4) {
-    return FillProcessInfo(gSystemProcess, Info);
+    if (FillProcessInfo(gSystemProcess, Info) == EFI_SUCCESS) {
+      gCachedProcessPid = Pid;
+      gCachedProcessEprocess = gSystemProcess;
+      return EFI_SUCCESS;
+    }
+    return EFI_NOT_FOUND;
   }
   Head = gSystemProcess + gLinksOffset;
   if (ReadVirt64(gKernelCr3, Head, &Link) != EFI_SUCCESS) {
@@ -755,12 +837,20 @@ static EFI_STATUS FindProcessPid(UINT32 Pid, PROCESS_INFO *Info) {
   for (Guard = 0; Guard < 4096 && IsKernelPtr(Link) && Link != Head; Guard++) {
     UINT64 Eprocess = Link - gLinksOffset;
     UINT64 CurrentPid;
+    if (RequestBudgetExceeded()) {
+      return EFI_TIMEOUT;
+    }
     if (ReadVirt64(gKernelCr3, Eprocess + gPidOffset, &CurrentPid) !=
         EFI_SUCCESS) {
       break;
     }
     if ((UINT32)CurrentPid == Pid) {
-      return FillProcessInfo(Eprocess, Info);
+      if (FillProcessInfo(Eprocess, Info) == EFI_SUCCESS) {
+        gCachedProcessPid = Pid;
+        gCachedProcessEprocess = Eprocess;
+        return EFI_SUCCESS;
+      }
+      return EFI_NOT_FOUND;
     }
     if (ReadVirt64(gKernelCr3, Eprocess + gLinksOffset, &Link) !=
         EFI_SUCCESS) {
@@ -776,7 +866,11 @@ static EFI_STATUS FindProcessName(const char *Name, PROCESS_INFO *Info) {
   UINT32 Guard;
   char CurrentName[NAME_SIZE];
 
-  if (ResolveProcessLayout() != EFI_SUCCESS || gNameOffset == 0) {
+  EFI_STATUS LayoutStatus = ResolveProcessLayout();
+  if (LayoutStatus == EFI_TIMEOUT) {
+    return LayoutStatus;
+  }
+  if (EFI_ERROR(LayoutStatus) || gNameOffset == 0) {
     return EFI_NOT_FOUND;
   }
   ZeroMem(CurrentName, sizeof(CurrentName));
@@ -791,6 +885,9 @@ static EFI_STATUS FindProcessName(const char *Name, PROCESS_INFO *Info) {
   }
   for (Guard = 0; Guard < 4096 && IsKernelPtr(Link) && Link != Head; Guard++) {
     UINT64 Eprocess = Link - gLinksOffset;
+    if (RequestBudgetExceeded()) {
+      return EFI_TIMEOUT;
+    }
     ZeroMem(CurrentName, sizeof(CurrentName));
     CopyVirtCr3(gKernelCr3, Eprocess + gNameOffset, CurrentName,
                 sizeof(CurrentName) - 1, 0);
@@ -832,6 +929,9 @@ static EFI_STATUS FindUserModule(UINT32 Pid, const char *Name,
       char ModuleName[NAME_SIZE];
       UINT64 Base;
       UINT32 Size;
+      if (RequestBudgetExceeded()) {
+        return EFI_TIMEOUT;
+      }
       ZeroMem(ModuleName, sizeof(ModuleName));
       if (ReadLdrEntry(Process.Cr3, Link, Biases[Index], ModuleName,
                        sizeof(ModuleName), &Base, &Size) == EFI_SUCCESS &&
@@ -868,6 +968,9 @@ static EFI_STATUS FindKernelModule(const char *Name, MODULE_INFO *Module) {
     char ModuleName[NAME_SIZE];
     UINT64 Base;
     UINT32 Size;
+    if (RequestBudgetExceeded()) {
+      return EFI_TIMEOUT;
+    }
     if (ReadVirt64(gKernelCr3, Link + 0x30, &Base) == EFI_SUCCESS &&
         ReadVirt32(gKernelCr3, Link + 0x40, &Size) == EFI_SUCCESS &&
         ReadUnicodeName(gKernelCr3, Link + 0x58, ModuleName,
@@ -918,7 +1021,18 @@ static EFI_STATUS HandleRequest(REQUEST *Request, RESPONSE *Response) {
   ZeroMem(&Module, sizeof(Module));
   ZeroMem(Scratch, sizeof(Scratch));
   if (Request->Magic != REQ_MAGIC) {
+    gSmmDebugState.RuntimeInvalidMagicCount++;
     return EFI_NOT_FOUND;
+  }
+  if (Request->DataSize > REQUEST_SIZE - 48U) {
+    gSmmDebugState.RuntimeInvalidSizeCount++;
+    return EFI_INVALID_PARAMETER;
+  }
+  if (Request->Sequence == 0 || Request->Sequence <= gLastRequestSequence) {
+    gSmmDebugState.RuntimeSequenceAnomalyCount++;
+  }
+  if (Request->Sequence > gLastRequestSequence) {
+    gLastRequestSequence = Request->Sequence;
   }
   Size = (UINT32)Request->Arg3;
   if (Request->Command == CMD_PING) {
@@ -926,11 +1040,11 @@ static EFI_STATUS HandleRequest(REQUEST *Request, RESPONSE *Response) {
     return EFI_SUCCESS;
   }
   if (Request->Command == CMD_READ_PHYS) {
-    Size = (UINT32)Request->Arg2;
-    if (Size > RESPONSE_DATA_SIZE) {
+    if (Request->Arg2 > RESPONSE_DATA_SIZE) {
       Reply(Response, Request, EFI_INVALID_PARAMETER, 0, 0, 0);
       return EFI_INVALID_PARAMETER;
     }
+    Size = (UINT32)Request->Arg2;
     Status = CopyPhys(Request->Arg1, Scratch, Size, 0);
     Reply(Response, Request, Status, Request->Arg1, Scratch,
           EFI_ERROR(Status) ? 0 : Size);
@@ -950,6 +1064,11 @@ static EFI_STATUS HandleRequest(REQUEST *Request, RESPONSE *Response) {
     return Status;
   }
   if (Request->Command == CMD_FIND_PROCESS_NAME) {
+    if (Request->DataSize == 0 || Request->Data[Request->DataSize - 1] != 0) {
+      gSmmDebugState.RuntimeInvalidSizeCount++;
+      Reply(Response, Request, EFI_INVALID_PARAMETER, 0, 0, 0);
+      return EFI_INVALID_PARAMETER;
+    }
     Status = FindProcessName((char *)Request->Data, &Process);
     Reply(Response, Request, Status, Process.Eprocess, &Process,
           EFI_ERROR(Status) ? 0 : sizeof(Process));
@@ -964,10 +1083,11 @@ static EFI_STATUS HandleRequest(REQUEST *Request, RESPONSE *Response) {
     return Status;
   }
   if (Request->Command == CMD_READ_VIRT) {
-    if (Size > RESPONSE_DATA_SIZE) {
+    if (Request->Arg3 > RESPONSE_DATA_SIZE) {
       Reply(Response, Request, EFI_INVALID_PARAMETER, 0, 0, 0);
       return EFI_INVALID_PARAMETER;
     }
+    Size = (UINT32)Request->Arg3;
     Status = FindProcessPid((UINT32)Request->Arg1, &Process);
     if (!EFI_ERROR(Status)) {
       Status = CopyVirtCr3(Process.Cr3, Request->Arg2, Scratch, Size, 0);
@@ -990,6 +1110,11 @@ static EFI_STATUS HandleRequest(REQUEST *Request, RESPONSE *Response) {
     return Status;
   }
   if (Request->Command == CMD_FIND_MODULE) {
+    if (Request->DataSize == 0 || Request->Data[Request->DataSize - 1] != 0) {
+      gSmmDebugState.RuntimeInvalidSizeCount++;
+      Reply(Response, Request, EFI_INVALID_PARAMETER, 0, 0, 0);
+      return EFI_INVALID_PARAMETER;
+    }
     Status = FindUserModule((UINT32)Request->Arg1, (char *)Request->Data,
                             &Module);
     Reply(Response, Request, Status, Module.Base, &Module,
@@ -997,13 +1122,20 @@ static EFI_STATUS HandleRequest(REQUEST *Request, RESPONSE *Response) {
     return Status;
   }
   if (Request->Command == CMD_FIND_KERNEL_MODULE) {
+    if (Request->DataSize == 0 || Request->Data[Request->DataSize - 1] != 0) {
+      gSmmDebugState.RuntimeInvalidSizeCount++;
+      Reply(Response, Request, EFI_INVALID_PARAMETER, 0, 0, 0);
+      return EFI_INVALID_PARAMETER;
+    }
     Status = FindKernelModule((char *)Request->Data, &Module);
     Reply(Response, Request, Status, Module.Base, &Module,
           EFI_ERROR(Status) ? 0 : sizeof(Module));
     return Status;
   }
   if (Request->Command == CMD_FIND_EXPORT) {
-    if (Request->DataSize <= sizeof(MODULE_INFO)) {
+    if (Request->DataSize <= sizeof(MODULE_INFO) ||
+        Request->Data[Request->DataSize - 1] != 0) {
+      gSmmDebugState.RuntimeInvalidSizeCount++;
       Reply(Response, Request, EFI_INVALID_PARAMETER, 0, 0, 0);
       return EFI_INVALID_PARAMETER;
     }
@@ -1016,6 +1148,7 @@ static EFI_STATUS HandleRequest(REQUEST *Request, RESPONSE *Response) {
     Reply(Response, Request, Status, Address, 0, 0);
     return Status;
   }
+  gSmmDebugState.RuntimeInvalidCommandCount++;
   Reply(Response, Request, EFI_UNSUPPORTED, 0, 0, 0);
   return EFI_UNSUPPORTED;
 }
@@ -1031,6 +1164,7 @@ static EFI_STATUS ProcessRequest(VOID) {
 
 #if DEBUG_RUNTIME_TIMING
   Start = __rdtsc();
+  gRequestStartCycles = Start;
 #endif
   if (gMailboxPhysical == 0 || gMailboxSize < MAILBOX_SIZE) {
     Status = EFI_NOT_FOUND;
@@ -1038,6 +1172,9 @@ static EFI_STATUS ProcessRequest(VOID) {
   }
   Request = (REQUEST *)(UINTN)gMailboxPhysical;
   Response = (RESPONSE *)(UINTN)(gMailboxPhysical + RESPONSE_OFFSET);
+  if (Request->Magic != REQ_MAGIC) {
+    ZeroMem(Response, sizeof(*Response));
+  }
   Status = HandleRequest(Request, Response);
 
 RecordRuntime:
@@ -1052,12 +1189,20 @@ RecordRuntime:
           ? ((REQUEST *)(UINTN)gMailboxPhysical)->Command
           : 0;
   gSmmDebugState.RuntimeLastStatus = (UINT32)Status;
+  gSmmDebugState.RuntimeLastSequence =
+      (gMailboxPhysical != 0 && gMailboxSize >= MAILBOX_SIZE)
+          ? ((REQUEST *)(UINTN)gMailboxPhysical)->Sequence
+          : 0;
   gSmmDebugState.RuntimeLastCycles = End - Start;
   if (gSmmDebugState.RuntimeLastCycles > gSmmDebugState.RuntimeMaxCycles) {
     gSmmDebugState.RuntimeMaxCycles = gSmmDebugState.RuntimeLastCycles;
   }
   gSmmDebugState.RuntimeTotalCycles += gSmmDebugState.RuntimeLastCycles;
-  SaveSmmDebug();
+  /* Avoid a non-volatile firmware-variable write on every SMI. */
+  if ((gSmmDebugState.RuntimeRequestCount & 63ULL) == 0) {
+    SaveSmmDebug();
+  }
+  gRequestStartCycles = 0;
 #endif
   return Status;
 }
