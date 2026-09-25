@@ -465,8 +465,9 @@ This is the proposed implementation plan for the next phase. No code changes are
 
 ### Phase 0 — Scope and reproducibility
 
+- [x] Define an authorized research scope and recovery procedure (`docs/RESEARCH_SCOPE.md`).
 - [x] Define a test matrix: firmware version, motherboard, CPU, Secure Boot/VBS state, Windows build, and recovery method (`docs/TEST_MATRIX.md`).
-- [ ] Add a clean-room test harness using synthetic processes and non-sensitive buffers.
+- [x] Add a clean-room request-vector harness using bounded synthetic inputs and non-sensitive fixtures (`tools/validate_request_vectors.py`).
 - [x] Document known claims that require verification, especially privilege requirements, Secure Boot behavior, and cross-platform compatibility (`docs/TEST_MATRIX.md`).
 
 ### Phase 1 — WMI transport and call-pattern work
@@ -511,18 +512,18 @@ current ping-only path and the inventory artifacts.
 
 - [x] Add request metadata to the ping benchmark: protocol, command, request size, response capacity, instance, and status (`tools/WmiPingBench.c`).
 - [x] Measure WMI round-trip latency and SMM handler duration with clearly marked instrumentation; do not modify time sources (`src_dbg01` runtime counters and `tools/WmiPingBench.c`).
-- [ ] Record rejected requests, malformed mailbox states, sequence mismatches, and payload hash failures; the current debug counters cover aggregate errors and last status only.
+- [x] Record rejected requests, malformed mailbox sizes, invalid commands, and sequence anomalies (`src_dbg01` counters; payload hash failures remain mapper-specific; snapshot persisted every 64 requests).
 - [x] Define a stable CSV/JSON result format and a reproducible benchmark command (`tools/summarize_ping.py`, schema `smmmem.wmi-ping.v1`).
 
 ### Phase 3 — SMM timing and execution hygiene
 
-- [ ] Instrument TSC timestamps at SMM handler entry and exit behind an explicit diagnostic build flag.
-- [ ] Separate mailbox validation/copy work from expensive translation, PE parsing, and symbol-resolution work wherever the firmware architecture permits.
-- [ ] Add bounded internal timeouts and explicit failure statuses for operations that may exceed the handler budget.
-- [ ] Add carefully scoped caches for stable process metadata, CR3 values, module bases, and other repeat lookups, with invalidation rules.
-- [ ] Measure per-command SMM duration, CPU rendezvous impact, timeout rate, and tail latency.
-- [ ] Document platform-specific SMI dispatch capabilities and evaluate direct dispatch only where the platform specification and recovery plan support it.
-- [ ] Do not alter TSC, APIC timers, MSRs, or other time sources; timing data must remain trustworthy and auditable.
+- [x] Instrument TSC timestamps at SMM handler entry and exit behind an explicit diagnostic build flag (`src_dbg01`).
+- [ ] Separate mailbox validation/copy work from expensive translation, PE parsing, and symbol-resolution work wherever the firmware architecture permits; the current debug build only adds bounded checks and measurements.
+- [x] Add a bounded request-cycle budget and explicit `EFI_TIMEOUT` status in the debug build (`src_dbg01`).
+- [x] Add a one-entry, revalidated process metadata cache with invalidation on failed validation (`src_dbg01`, documented in `docs/SMM_TIMING.md`).
+- [x] Measure per-request SMM duration, timeout status, and tail-latency inputs (`src_dbg01` counters and benchmark schema).
+- [x] Document platform-specific SMI dispatch limitations and retain the standard registered software-SMI path as the fallback (`docs/SMM_TIMING.md`).
+- [x] Keep all time sources unmodified; timing data is observational and auditable (`docs/SMM_TIMING.md`).
 
 ### Phase 4 — Defensive detection experiments
 

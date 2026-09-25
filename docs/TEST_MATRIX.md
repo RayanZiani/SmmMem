@@ -52,6 +52,19 @@ exposes the last, maximum, total, request count, error count, and last command
 through `SmmMemSmmDebug`. The counters are observational only: the firmware
 does not write or adjust any time source.
 
+The offline request-vector harness validates magic, known-command status,
+bounded-size, NUL-termination, and sequence fixtures without contacting
+firmware:
+
+```bat
+py tools\validate_request_vectors.py --json
+```
+
+The harness is a clean-room protocol test, not a firmware test: a passing
+result confirms only that the local fixture rules and expected classifications
+agree. Firmware results still require the debug build on authorized lab
+hardware.
+
 ## Compatibility claims to verify
 
 - whether the stated Windows privilege requirements match the actual client and diagnostic paths;
