@@ -439,48 +439,15 @@ Mapper-specific failure points:
 
 ## Roadmap
 
-Current state: the firmware trees (`src/`, `src_dbg01/`, `mapper/`) build and the
-protocol/transport tooling exists. The next steps, in rough priority order:
+See `docs/ROADMAP.md`. It defines three pillars with measurable acceptance
+criteria — stealth/undetectability (batch command, pacing/jitter, SMM handler
+time reduction, silent release build), reliability (watchdog, fuzzing,
+power-state correctness), and performance (latency distributions) — plus the
+execution order. The next coding step is a batched read command
+(`CMD_READ_BATCH`) spanning `src/Common.h`, `src/Smm.c`, `src/Client.c`, and
+`src/Api.h`.
 
-### 1. Protocol and transport improvements
-- Add a batch command (`CMD_READ_BATCH`) that accepts a list of addresses and
-  returns a single response buffer, cutting the number of WMI round-trips per
-  memory operation.
-- Add request pacing and jitter in the client (randomized inter-call delay,
-  configurable) instead of fixed timing.
-- Optional COM transport (`IWbemServices::ExecMethod`) as an alternative to
-  `WmiExecuteMethodW`, selectable at build time.
-
-### 2. SMM handler optimization
-- Move expensive work out of SMM where possible: virtual-address translation,
-  process/module discovery, and symbol resolution are the hot paths.
-- Extend the process-metadata cache (currently one entry in `src_dbg01`) to
-  more entries with proper invalidation.
-- Reduce handler time for large operations; keep the request-cycle budget and
-  `EFI_TIMEOUT` path from the debug build and port it to the release tree.
-
-### 3. Client API completeness
-- Expose batching through the public API in `Api.h` (e.g. `ReadVirtBatch`).
-- Add a streaming read helper that transparently chunks large transfers across
-  multiple WMI calls.
-- Review error reporting so partial failures inside a batch are attributable.
-
-### 4. Mapper robustness
-- Fix the `DxeBridge.c` temporary mutation of the SMM Communication Region
-  descriptor (crash between mutation and restore corrupts the memory map).
-- Support more tracked SMI-handler/pool slots or make them dynamic.
-- Consider supporting PE32+ payloads with a small import resolver, or keep
-  documenting the self-contained requirement.
-
-### 5. Validation
-- Work through the test matrix in `docs/TEST_MATRIX.md` on the target board
-  and record results (latency, throughput, failure modes).
-- Benchmark before/after each SMM change using `tools/WmiPingBench.c` and
-  `tools/summarize_ping.py` so timing claims are backed by numbers.
-
-### Deferred / optional
-- Portability check on an Intel platform to confirm the claimed portability.
-- `docs/CHANGELOG.md` and semantic versioning for the firmware and client API.
+### SMRAM Footprint
 
 ### SMRAM Footprint
 
