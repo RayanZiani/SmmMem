@@ -23,6 +23,7 @@ SmmMem exposes a small Windows client API that can read, write, translate, and r
 - [Conventions](#conventions)
 - [Troubleshooting](#troubleshooting)
 - [Notes and Limitations](#notes)
+- [Detection and Mitigation](#detection-and-mitigation)
 - [Roadmap](#roadmap)
 
 The repository contains three independent firmware trees:
@@ -427,6 +428,44 @@ Mapper-specific failure points:
 - payload PE32+ image has imports (unsupported — payloads must be fully self-contained)
 - payload image exceeds 768KB (SMRAM image buffer limit)
 - all 16 tracked handler or pool slots exhausted by a payload
+
+## Detection and Mitigation
+
+SmmMem is firmware-resident, so the usual anticheat scan surface — drivers,
+loaded DLLs, hypervisor artifacts, DMA device names — does not exist. What
+remains observable to a defender, and what the design does about it:
+
+| Observable by a defender / anticheat | Status | Containment |
+|---|---|---|
+| Custom WMI provider / ACPI SSDT device | measurable | per-install identifiers, vendor-shaped surface; verified with the `tools/` snapshot diffs (roadmap S5/S7) |
+| SMI latency (RDTSC deltas measured around victim code) | measurable | batched reads (one SMI per N reads), bounded handler budget — SMI cost must stay near ambient firmware SMI noise (S1/S3) |
+| SMI count deltas (e.g. `MSR_SMI_COUNT` on Intel) | measurable | few, small, irregularly timed SMIs; client pacing plus a handler-side rate limiter (S2/S9) |
+| UEFI variables / debug artifacts | must be zero | the release tree writes no variables and no serial output (S6) |
+| Kernel driver, hypervisor, DMA device | none | no driver exists; SmmMem is not a hypervisor and exposes no device |
+| Secure Boot / TPM 2.0 / HVCI / IOMMU | unaffected | reflashing the firmware does not disturb the Windows-signed boot chain; SMM access bypasses rather than attacks HVCI; the handler does CPU-I/O only and does not involve the IOMMU (R9) |
+
+Honest limits — read before trusting the table:
+
+- The TSC keeps counting inside SMM. Handler duration is visible to any code
+  that measures with RDTSC; it can be minimized and blended with ambient SMI
+  noise, not hidden. Full masking would require RDTSC interception, i.e. a
+  hypervisor — out of scope and itself detectable.
+- Boot Guard / PSP verified boot, where a board enforces it, blocks the
+  reflash path entirely. This, not Secure Boot, is the real structural
+  constraint; verify per board before flashing.
+- "Undetectable" describes today's publicly known detection methods, not a
+  guarantee. Behavioral detection and ban waves remain possible for any cheat,
+  firmware or otherwise; test only on dedicated, unattributed hardware and
+  accounts.
+- Any user able to reach the WMI method can currently stage a mapper payload
+  (FNV-1a is a hash, not authentication) — tracked as R7 in the roadmap.
+
+For defenders: the three practical detection levers are (1) WMI/ACPI provider
+enumeration against a known-good baseline, (2) statistical SMI timing and SMI
+count monitoring, and (3) firmware integrity checking of the SPI image or the
+SMM handler at boot. The design goal here is to make (1) look like vendor
+noise and (2) stay under ambient SMI noise; only (3) is a structural defense,
+and it is Boot Guard-class hardware verification.
 
 ## Notes
 

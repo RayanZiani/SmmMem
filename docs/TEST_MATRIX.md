@@ -4,11 +4,16 @@ This matrix is a template for controlled, repeatable validation. An empty cell m
 
 ## Platform matrix
 
-| ID | Board / firmware | CPU | Windows build | Secure Boot | VBS | Source tree | Recovery verified | Result |
-|---|---|---|---|---|---|---|---|---|
-| LAB-01 | ASUS TUF X870 / record exact version | AMD AM5 | record exact build | record | record | `src_dbg01` | yes/no | pending |
-| LAB-02 | record | AMD AM4 or equivalent | record | record | record | `src_dbg01` | yes/no | pending |
-| LAB-03 | record | Intel platform | record | record | record | `src_dbg01` | yes/no | pending |
+| ID | Board / firmware | CPU | Windows build | Secure Boot | VBS | TPM 2.0 owned | BitLocker on OS drive | Source tree | Recovery verified | Result |
+|---|---|---|---|---|---|---|---|---|---|---|
+| LAB-01 | ASUS TUF X870 / record exact version | AMD AM5 | record exact build | record | record | record | record | `src_dbg01` | yes/no | pending |
+| LAB-02 | record | AMD AM4 or equivalent | record | record | record | record | record | `src_dbg01` | yes/no | pending |
+| LAB-03 | record | Intel platform | record | record | record | record | record | `src_dbg01` | yes/no | pending |
+
+Reflash/reinstall cycles on these boards must be run with all security
+features on (R6 in the roadmap). A BitLocker recovery prompt after a reflash
+is a failed result, not a workaround opportunity: record it and fix the
+flash/recovery path.
 
 ## Functional baseline
 

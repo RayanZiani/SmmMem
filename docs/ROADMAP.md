@@ -59,6 +59,34 @@ release tree.
 - **Accept:** zero SmmMem strings/variables recoverable from a flashed
   release image by string and GUID sweep.
 
+### S7. WMI/ACPI surface minimization and per-install identifiers
+Keep the installed WMI provider, class name, and instance list outside the
+range of anything a signature sweep can match: identifiers are randomized per
+installation (per board, not per boot), and the provider never appears as a
+novel row in `tools/WmiInventory.exe` / `WmiProviderInventory.exe` snapshot
+diffs against a known-good baseline.
+- **Accept:** `ROOT\WMI` and `ROOT\CIMV2` snapshot diffs show zero new
+  class/provider entries attributable to SmmMem; two independent
+  installations carry different identifiers.
+
+### S8. Write allowlist in the handler
+Every `CMD_WRITE_*` request is validated against a handler-side allowlist
+before any byte is written. Ranges that intersect executable sections of
+loaded module images are rejected by default, so a compromised or buggy
+client cannot become a code-patching tool that integrity scans catch.
+- **Accept:** a write whose target intersects an executable module range
+  returns a defined status without touching memory; the R3 fuzz harness
+  includes these cases; data-only writes proceed normally.
+
+### S9. Handler-side SMI rate limiter
+The SMM handler enforces its own request-rate cap, independent of client
+pacing. A runaway or malicious client is throttled with a defined status
+instead of being allowed to create an SMI storm that shows up as
+system-wide latency anomalies.
+- **Accept:** a client that floods the doorbell receives throttled status
+  responses, SMI delivery rate stays under the configured cap, and no
+  measurable scheduling anomaly beyond baseline appears during the flood.
+
 ---
 
 ## Pillar 2 — Reliability ("infaillible")
@@ -98,6 +126,41 @@ must provably unregister every handler and free every pool.
 - **Accept:** load/unload loop of 1000 random payloads (valid + malformed)
   ends with zero leaked handlers, zero leaked pools, verified by instrumentation.
 
+### R6. Full-security boot matrix
+Every reliability test also runs with Secure Boot on, HVCI/Memory Integrity
+on, TPM 2.0 present and owned, and BitLocker active on the OS drive — the
+exact configuration the strictest target platform requires. Track the TPM and
+BitLocker columns added to `docs/TEST_MATRIX.md`.
+- **Accept:** boot cycles complete with no BitLocker recovery prompt, no TPM
+  ownership error, and no HVCI policy regression, recorded in the test matrix.
+
+### R7. Mapper payload authentication
+The FNV-1a payload hash is an integrity check, not an authenticator: any
+local process that can reach the WMI method can stage a payload. Replace it
+with an HMAC over the staged payload using a per-board secret provisioned at
+flash time.
+- **Accept:** reload attempts with an invalid MAC are rejected before any PE
+  parsing or pool allocation; valid MACs still load and run. If the secret
+  model is judged impractical, the "any local admin can inject a payload"
+  limitation is documented in the README instead of left implicit.
+
+### R8. Clean uninstall path
+Provide and test a full removal route — a `Dxe.efi` neutralize routine or a
+documented reflash-to-stock procedure — that leaves no stale SSDT/WMI device,
+no UEFI variables, and no half-removed ACPI markers behind. A half-removed
+installation is both a crash source and a detection artifact.
+- **Accept:** after uninstall, the `ROOT\WMI`/ACPI snapshot equals the
+  pre-install baseline and three consecutive cold boots show zero residual
+  SmmMem artifacts or boot errors.
+
+### R9. IOMMU non-interference
+Verify the handler behaves correctly with DMA remapping active (AMD-Vi/VT-d
+enabled, Hyper-V Gen2, devices using DMA): the handler performs CPU I/O only
+and never touches the IOMMU page tables or the memory regions DMA devices
+assume.
+- **Accept:** a full functional baseline run passes with DMA remapping and
+  Hyper-V Gen2 enabled, and no DMA remapping errors appear in system logs.
+
 ---
 
 ## Pillar 3 — Performance
@@ -132,7 +195,17 @@ the QWORD copy/zero routines with no byte loops on hot paths.
    holes before anything else is built on top.
 4. **S3** (cache + budget port) — needs the R2 budget as its base.
 5. **R3** (fuzz harness) — once the surface stops moving.
-6. **S4/S5/S6, R4/R5, P1–P3** — iterate.
+6. **R6** (full-security boot matrix) — prove the design boots and survives on
+   a Secure Boot + TPM 2.0 + HVCI + BitLocker machine before hardening it;
+   nothing else matters if the strictest target config cannot even run it.
+7. **S5 + S7** (identifier sweep resistance) — the literal-string surface is
+   the cheapest thing for a defender to scan; kill it before statistical
+   tuning.
+8. **S4/S6/S8/S9, R4/R5/R7/R8/R9, P1–P3** — iterate. Evaluate S4 first and
+   drop it quickly if the TSC side channel cannot be contained: SMM cannot
+   stop the TSC, so the delta can be minimized (batching, short handlers) but
+   never eliminated without RDTSC interception, which is a hypervisor
+   technique and therefore out of scope.
 
 ## Appendix — `CMD_READ_BATCH` design (task 1 spec)
 
