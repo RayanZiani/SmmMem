@@ -6,8 +6,6 @@ Driverless Windows memory access through System Management Mode (SMM) with a use
 
 SmmMem exposes a small Windows client API that can read, write, translate, and resolve memory without installing a kernel driver. The user-mode client talks to an ACPI WMI method, which copies a request into a shared mailbox and rings a software SMI doorbell. The SMM handler then performs the requested operation from Ring −2 and writes the response back to the mailbox.
 
-> **Research and safety scope.** This repository is a firmware-security research PoC. It must only be used on hardware owned by the operator, with explicit authorization and a recovery path for firmware failure. The project currently exposes highly privileged memory and payload-loading capabilities; it is not suitable for production systems.
-
 ## Table of Contents
 
 - [Overview](#overview)
@@ -22,11 +20,10 @@ SmmMem exposes a small Windows client API that can read, write, translate, and r
 - [Platform Notes](#platform-notes)
 - [Debug Build (`src_dbg01`)](#debug-build-src_dbg01)
 - [Mapper (`mapper/`)](#mapper-mapper)
-- [Security and Detection](#security-and-detection)
-- [Implementation Roadmap](#implementation-roadmap)
 - [Conventions](#conventions)
 - [Troubleshooting](#troubleshooting)
 - [Notes and Limitations](#notes)
+- [Roadmap](#roadmap)
 
 The repository contains three independent firmware trees:
 
@@ -440,179 +437,50 @@ Mapper-specific failure points:
 - The mapper's payload hash uses FNV-1a 64-bit for integrity verification, not cryptographic authentication. Any user who can reach the WMI method can upload an arbitrary payload.
 - All memory copy and zero functions (`CopyMem`, `ZeroMem`, custom `memcpy`/`memset`) have been optimized to use QWORD (64-bit) wide memory accesses. This greatly improves bulk operation throughput while maintaining zero CRT dependency.
 
-## Security and Detection
+## Roadmap
 
-SmmMem is intentionally easy to study as a defender. Its observable and auditable indicators include:
+Current state: the firmware trees (`src/`, `src_dbg01/`, `mapper/`) build and the
+protocol/transport tooling exists. The next steps, in rough priority order:
 
-- firmware changes and unexpected DXE/SMM modules;
-- dynamically installed ACPI/WMI devices, custom WMI GUIDs, UIDs, methods, and unusual mailbox sizes;
-- software SMI registration and a repeatable WMI → mailbox → SMI request sequence;
-- SMM execution latency, CPU rendezvous impact, and abnormal SMI frequency;
-- arbitrary physical-memory access, page-table walking, process/module enumeration, and export resolution;
-- the mapper's runtime PE loading, executable SMRAM image, hot reload, unsigned payloads, and FNV-1a-only integrity check;
-- debug UEFI variables, serial traces, and firmware configuration-table markers.
+### 1. Protocol and transport improvements
+- Add a batch command (`CMD_READ_BATCH`) that accepts a list of addresses and
+  returns a single response buffer, cutting the number of WMI round-trips per
+  memory operation.
+- Add request pacing and jitter in the client (randomized inter-call delay,
+  configurable) instead of fixed timing.
+- Optional COM transport (`IWbemServices::ExecMethod`) as an alternative to
+  `WmiExecuteMethodW`, selectable at build time.
 
-### Defensive evaluation principles
+### 2. SMM handler optimization
+- Move expensive work out of SMM where possible: virtual-address translation,
+  process/module discovery, and symbol resolution are the hot paths.
+- Extend the process-metadata cache (currently one entry in `src_dbg01`) to
+  more entries with proper invalidation.
+- Reduce handler time for large operations; keep the request-cycle budget and
+  `EFI_TIMEOUT` path from the debug build and port it to the release tree.
 
-1. Establish a clean firmware and OS baseline before each experiment.
-2. Record firmware hashes, ACPI tables, WMI inventory, SMI counters/latency, and relevant Windows event/ETW telemetry.
-3. Run only benign commands such as health checks and bounded reads against synthetic test data; do not use real credentials or third-party machines.
-4. Compare SmmMem traces with a legitimate monitoring workload without trying to make SmmMem resemble it.
-5. Preserve recovery media, SPI backup, serial output, and a board-specific reflashing procedure.
+### 3. Client API completeness
+- Expose batching through the public API in `Api.h` (e.g. `ReadVirtBatch`).
+- Add a streaming read helper that transparently chunks large transfers across
+  multiple WMI calls.
+- Review error reporting so partial failures inside a batch are attributable.
 
-## Implementation Roadmap
+### 4. Mapper robustness
+- Fix the `DxeBridge.c` temporary mutation of the SMM Communication Region
+  descriptor (crash between mutation and restore corrupts the memory map).
+- Support more tracked SMI-handler/pool slots or make them dynamic.
+- Consider supporting PE32+ payloads with a small import resolver, or keep
+  documenting the self-contained requirement.
 
-This is the proposed implementation plan for the next phase. No code changes are implied by this section alone.
+### 5. Validation
+- Work through the test matrix in `docs/TEST_MATRIX.md` on the target board
+  and record results (latency, throughput, failure modes).
+- Benchmark before/after each SMM change using `tools/WmiPingBench.c` and
+  `tools/summarize_ping.py` so timing claims are backed by numbers.
 
-### Phase 0 — Scope and reproducibility
-
-- [x] Define an authorized research scope and recovery procedure (`docs/RESEARCH_SCOPE.md`).
-- [x] Define a test matrix: firmware version, motherboard, CPU, Secure Boot/VBS state, Windows build, and recovery method (`docs/TEST_MATRIX.md`).
-- [x] Add a clean-room request-vector harness using bounded synthetic inputs and non-sensitive fixtures (`tools/validate_request_vectors.py`).
-- [x] Document known claims that require verification, especially privilege requirements, Secure Boot behavior, and cross-platform compatibility (`docs/TEST_MATRIX.md`).
-
-### Phase 1 — WMI transport and call-pattern work
-
-- [x] Inventory the WMI providers present on the target and document which ACPI/WMI paths are available for a controlled research comparison (`tools/WmiProviderInventory.cpp`).
-- [x] Evaluate existing providers as inventory data without substituting them for the project-owned diagnostic transport (`docs/WMI_TRANSPORT.md`).
-- [x] Document stable identifiers, ownership, registration, and lifecycle for the project-owned transports (`docs/WMI_TRANSPORT.md`).
-- [x] Define current mailbox boundaries and bounded request/response fragments; protocol changes remain a separate compatibility task (`docs/WMI_TRANSPORT.md`).
-- [ ] Add an optional COM/WMI `ExecMethod` implementation for the privileged project channel — deferred pending an explicit protocol-compatibility design and isolated validation.
-- [ ] Compare direct `WmiOpenBlock`/`WmiExecuteMethodW` with a COM project-channel transport — deferred with the COM implementation.
-- [ ] Add a batch command for groups of memory operations — deferred to the safety-hardening and authorization design; the current benchmark remains ping-only.
-- [x] Define configurable request pacing, bounded concurrency, and lifecycle-aware scheduling for repeatable experiments; keep defaults deterministic and observable (`tools/WmiPingBench.c`, ping-only).
-- [x] Document the current transports, identifiers, request boundaries, and COM comparison rules (`docs/WMI_TRANSPORT.md`).
-- [x] Add a bounded ping benchmark with CSV output and high-resolution elapsed-time measurement (`tools/WmiPingBench.c`).
-- [x] Add a read-only COM/WMI inventory utility for `ROOT\WMI` (`tools/WmiInventory.cpp`).
-- [x] Add a read-only provider inventory for `ROOT\CIMV2::__Win32Provider` (`tools/WmiProviderInventory.cpp`).
-- [x] Add a snapshot comparison tool with normalized class/provider CSV output and change exit codes (`tools/compare_wmi_snapshots.py`).
-- [x] Add an offline protocol consistency check covering request/response sizes, mailbox offsets, SMI values, GUIDs, and documented transport capacities (`tools/check_protocol_consistency.py`).
-- [ ] Document WMI identifier usurpation scenarios: what happens if another DXE driver installs a PNP0C14 device with the same GUID/UID, and how to detect or reject it.
-- [ ] Add a provider lifecycle timeline documenting when the ACPI/WMI device appears and disappears across boot, sleep, hibernate, and firmware reflash.
-- [ ] Add a WMI ACL audit documenting which principals can invoke the project method on a default Windows install.
-
-Build and run the benchmark from an x64 Visual Studio Developer Command Prompt:
-
-```bat
-tools\build.cmd
-tools\Work\WmiPingBench.exe 30 0 > ping.csv
-tools\Work\WmiInventory.exe > wmi-root-wmi.csv
-py tools\check_protocol_consistency.py
-```
-
-The benchmark sends `CMD_PING` only. It does not perform memory reads/writes or
-mapper payload operations. The output is intended to be collected on a prepared
-lab target after the firmware and WMI path have been validated.
-
-### Phase 1 completion note
-
-The safe, observational portion of Phase 1 is complete: the project now has
-transport documentation, class and provider inventories, snapshot comparison,
-and a bounded ping benchmark with reproducible CSV output. The remaining
-unchecked items are intentionally deferred because they would change the
-privileged protocol or increase its operation density before authorization,
-compatibility, and safety controls are defined. Phase 2 can proceed using the
-current ping-only path and the inventory artifacts.
-
-### Phase 2 — Baseline observability
-
-- [x] Add request metadata to the ping benchmark: protocol, command, request size, response capacity, instance, and status (`tools/WmiPingBench.c`).
-- [x] Measure WMI round-trip latency and SMM handler duration with clearly marked instrumentation; do not modify time sources (`src_dbg01` runtime counters and `tools/WmiPingBench.c`).
-- [x] Record rejected requests, malformed mailbox sizes, invalid commands, and sequence anomalies (`src_dbg01` counters; payload hash failures remain mapper-specific; snapshot persisted every 64 requests).
-- [x] Define a stable CSV/JSON result format and a reproducible benchmark command (`tools/summarize_ping.py`, schema `smmmem.wmi-ping.v1`).
-- [ ] Record ETW WMI-Activity telemetry (`Microsoft-Windows-WMI-Activity/Trace`) alongside the ping benchmark and correlate event IDs 19/20/21 with the SMI latency series.
-- [ ] Record Sysmon WMI events (Event ID 19/20/21) during a full benchmark run and store the resulting `.evtx` as a reproducible artifact.
-- [ ] Add a `docs/OBSERVABILITY_BASELINE.md` describing what a clean Windows install looks like for each monitored source (ETW, Sysmon, WMI-Activity) before SmmMem is installed.
-
-### Phase 3 — SMM timing and execution hygiene
-
-- [x] Instrument TSC timestamps at SMM handler entry and exit behind an explicit diagnostic build flag (`src_dbg01`).
-- [ ] Separate mailbox validation/copy work from expensive translation, PE parsing, and symbol-resolution work wherever the firmware architecture permits; the current debug build only adds bounded checks and measurements.
-- [x] Add a bounded request-cycle budget and explicit `EFI_TIMEOUT` status in the debug build (`src_dbg01`).
-- [x] Add a one-entry, revalidated process metadata cache with invalidation on failed validation (`src_dbg01`, documented in `docs/SMM_TIMING.md`).
-- [x] Measure per-request SMM duration, timeout status, and tail-latency inputs (`src_dbg01` counters and benchmark schema).
-- [x] Document platform-specific SMI dispatch limitations and retain the standard registered software-SMI path as the fallback (`docs/SMM_TIMING.md`).
-- [x] Keep all time sources unmodified; timing data is observational and auditable (`docs/SMM_TIMING.md`).
-- [ ] Measure SMM Rendezvous impact empirically on the target platform: issue an SMI while other logical CPUs are under controlled load and record the actual synchronization latency. Replace the current "does not claim locality" disclaimer with measured data.
-- [ ] Add a `CMD_DISABLE` kill switch to the debug build that unregisters the SW SMI handler and stops servicing the mailbox, usable without reflashing.
-- [ ] Add a global SMI watchdog: if the handler runs longer than a hard limit, abandon the operation, clear the mailbox, and return `EFI_ABORTED`.
-- [ ] Document SMI frequency impact on system stability (watchdog timers, latency-sensitive workloads) with measured numbers.
-
-### Phase 4 — Defensive detection experiments
-
-- [ ] Inventory ACPI/WMI objects before and after installation and produce a diff report.
-- [ ] Build a lab-only detector for new PNP0C14 devices, WMI identifiers, AML markers, and suspicious mailbox/SMI relationships.
-- [ ] Correlate WMI-Activity/ETW data with SMI latency and firmware debug records.
-- [ ] Add a detector for mapper-specific behaviors: payload staging, reloads, executable SMRAM regions, and weak integrity authentication.
-- [ ] Document false positives and detection blind spots.
-- [ ] Build a threat model (`docs/THREAT_MODEL.md`) mapping each observable indicator to a concrete adversary and telemetry source:
-  - Sysmon (WMI-Activity Event IDs 19/20/21, DriverLoad Event ID 6)
-  - ETW (`Microsoft-Windows-WMI-Activity`, `Microsoft-Windows-Kernel-Processor-Power`)
-  - Microsoft Defender for Endpoint (attack surface reduction rules)
-  - EasyAntiCheat (usermode hooks on `WmiExecuteMethodW`, kernel module scans)
-  - BattlEye (kernel module scans, integrity checks)
-  - Riot Vanguard (Ring -1 hypervisor, CPUID/CR-based SMM detection)
-  - Vendor-specific firmware scanners (e.g., CHIPSEC, `chipsec_main.py -m common.smm`)
-- [ ] Build a CHIPSEC-based validation script that runs `common.smm`, `common.smm_code_chk`, and `common.bios_wp` modules against the modified firmware and reports which checks fail.
-- [ ] Add a detection matrix mapping each Phase 4 detector to each Phase 4 adversary with pass/fail columns.
-- [ ] Publish lab-only detection tools as separate repositories or subdirectories (`detection/`) with clear "research only" disclaimers.
-- [ ] Add a Phase 4 results document (`docs/DETECTION_RESULTS.md`) with raw telemetry, screenshots, and reproducible commands.
-
-### Phase 5 — Safety hardening
-
-- [ ] Make write operations and arbitrary payload loading disabled by default in research builds.
-- [ ] Add explicit authorization/configuration gates and fail closed on invalid or stale configuration.
-- [ ] Replace unauthenticated FNV-1a payload acceptance with a documented cryptographic verification design, or remove runtime payload loading from the default build.
-- [ ] Bound all copies, addresses, command sizes, retries, and handler execution time; test malformed and concurrent requests.
-- [ ] Review mailbox lifetime, ACPI table installation, ExitBootServices behavior, and the temporary communication-region mutation.
-- [ ] Fix the `DxeBridge.c` temporary mutation of the SMM Communication Region descriptor: add a crash-safe restore path or avoid the mutation entirely.
-- [ ] Add concurrent-caller fuzzing: two user-mode processes issuing overlapping requests, malformed sequences, and truncated chunks.
-- [ ] Add SMRAM exhaustion tests: exhaust the 16-handler and 16-pool limits and verify graceful degradation.
-- [ ] Add payload size boundary tests: exactly 768KB, 768KB+1, zero-byte payload, malformed PE headers.
-- [ ] Add a mailbox lifetime review covering suspend/resume, hibernation, and fast startup.
-
-### Phase 6 — Validation and documentation
-
-- [ ] Run the matrix on disposable hardware or a firmware emulator where possible.
-- [ ] Publish latency, throughput, failure, and detection results with raw reproducible artifacts.
-- [ ] Add a Detection & Mitigation write-up covering firmware signing, measured boot, SMM Supervisor/STM, firmware integrity monitoring, and recovery.
-- [ ] Add a performance impact report: FPS impact during a synthetic game loop, system-wide latency during SMI bursts, boot-time cost of the mapper, and suspend/resume cost.
-- [ ] Add a Volatility 3 plugin (`tools/volatility/smmmem.py`) that scans a memory image for `SMMM`, `MEMDEV`, `WMBD`, and mapper markers.
-- [ ] Add a YARA rule pack (`detection/yara/`) for the DXE/SMM binaries, the mapper payload container, and the mailbox layout.
-- [ ] Add a Sigma rule pack (`detection/sigma/`) for WMI invocation patterns, process creation of the client, and firmware variable access.
-- [ ] Add a KQL / Sentinel query pack for Microsoft Defender for Endpoint customers.
-
-### Phase 7 — Platform and virtualization compatibility (new)
-
-- [ ] Document behavior with VBS / HVCI (Memory Integrity) enabled on Windows 11. Determine whether SMIs are intercepted by Hyper-V, whether SMRAM is re-protected, and whether the mailbox is reachable from Ring 0 virtualized contexts.
-- [ ] Document behavior with Credential Guard enabled and with Secure Launch / System Guard active.
-- [ ] Document behavior with SMM Lock (`BIOS_CNTL.SMMLOCK`) set and cleared, including the flashing procedure required to clear it on the target board.
-- [ ] Document interaction with TPM 2.0 + BitLocker: what happens to the measured-boot chain when the firmware is reflashed, and how to recover.
-- [ ] Document interaction with Intel TXT / AMD SKINIT and any active SMM Supervisor or STM (SMI Transfer Monitor) that sandboxes the SMM handler.
-- [ ] Add a test matrix column for HVCI, Credential Guard, SMM Lock, TPM, BitLocker, and STM/SMM Supervisor states.
-- [ ] Verify the claimed Intel portability on at least one real Intel platform and remove the claim if it cannot be demonstrated.
-- [ ] Add a firmware-version detection utility that records the exact firmware revision from MSR, SMBIOS, and the flash descriptor, and stores it in the benchmark output.
-- [ ] Document firmware reflash recovery for at least two board vendors (e.g., ASUS Flashback, MSI Flash BIOS Button).
-
-### Phase 8 — Publication and ecosystem contribution (new)
-
-- [ ] Add a GitHub Actions CI workflow that runs the offline tools (`check_protocol_consistency.py`, `validate_request_vectors.py`, `compare_wmi_snapshots.py`) on every push, with a CI badge in the README.
-- [ ] Add a static analysis workflow (clang-tidy, cppcheck, CodeQL) for the Windows client and firmware trees.
-- [ ] Add a build reproducibility check: two clean builds of the same tree must produce byte-identical `.efi` images.
-- [ ] Publish a technical blog post or `docs/WRITEUP.md` describing the research methodology, from firmware analysis to WMI transport to detection experiments.
-- [ ] Add a `docs/CHANGELOG.md` with semantic versioning for the firmware and the client API.
-
-### Cross-cutting acceptance criteria
-
-- [ ] Every transport variant has a documented protocol description, ownership model, identifier registry, and rollback procedure.
-- [ ] Every timing change is backed by before/after measurements collected without changing hardware time sources.
-- [ ] Every batching, fragmentation, pacing, or caching change has correctness tests for ordering, timeouts, partial transfers, cancellation, and concurrent callers.
-- [ ] Every platform-specific behavior is feature-detected and has a safe fallback.
-- [ ] Every experiment produces enough metadata to reproduce the result and distinguish firmware, OS, transport, and workload effects.
-- [ ] Every claimed capability in the README is backed by a measured result or explicitly marked as "not yet verified".
-- [ ] Every defensive claim (in `docs/THREAT_MODEL.md`) is backed by a reproducible detector or a referenced external tool.
-- [ ] Every phase has a corresponding `docs/PHASE_<N>_RESULTS.md` with raw artifacts once it is complete.
-- [ ] No item is marked `[x]` unless its result is reproducible from the repository alone.
+### Deferred / optional
+- Portability check on an Intel platform to confirm the claimed portability.
+- `docs/CHANGELOG.md` and semantic versioning for the firmware and client API.
 
 ### SMRAM Footprint
 

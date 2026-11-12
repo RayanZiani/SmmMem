@@ -1,4 +1,4 @@
-# WMI Transport — Phase 1
+# WMI Transport
 
 ## Scope
 
@@ -36,7 +36,7 @@ Identifiers are project-owned and must not be changed during a benchmark. Any
 future transport experiment needs a new experiment identifier and a separate
 result set so that measurements remain attributable.
 
-## Phase 1 decisions
+## Transport decisions
 
 - The first benchmark uses `CMD_PING` only.
 - It does not read or write arbitrary memory.
@@ -81,7 +81,7 @@ Provider names and CLSIDs are inventory data, not identifiers to copy into the
 project. Any comparison must preserve the original values and record the
 machine and Windows build from which the snapshot was taken.
 
-## Phase 1 exit criteria
+## Transport exit criteria
 
 Completed:
 
@@ -124,3 +124,4 @@ py tools\compare_wmi_snapshots.py providers-before.csv providers-after.csv --out
 
 Exit codes are `0` for no change, `1` for a detected change when
 `--fail-on-change` is used, and `2` for invalid input or an I/O error.
+
